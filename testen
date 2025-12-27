@@ -1,4 +1,4 @@
---// ONE GUI - TWO TOGGLES (FINAL MERGED + EndGame reset/auto upboard after 5s)
+--// ONE GUI - TWO TOGGLES (FINAL + EndGame + TurnOffBoard handling)
 -- Put this LocalScript in StarterPlayerScripts
 
 local Players = game:GetService("Players")
@@ -31,6 +31,12 @@ local autoUpgradeEnabled = false
 local currentMoney = 0
 local nextIndex = 1
 local upgradeBusy = false
+
+local function resetUpgrades(statusFn)
+	nextIndex = 1
+	upgradeBusy = false
+	if statusFn then statusFn("Upgrade: Reset") end
+end
 
 local function findTargetPreset()
 	local presets = Workspace:WaitForChild("Presets")
@@ -81,7 +87,7 @@ local function processUpgrades(updateUIFn)
 	upgradeBusy = false
 end
 
--- ===================== FEATURE 2: AUTO UPBOARD (LOOP + ENDGAME TRIGGER) =====================
+-- ===================== FEATURE 2: AUTO UPBOARD (CONSTANT CHECK) =====================
 local autoUpboardEnabled = false
 local upboardLastAction = nil
 local upboardLastFireAt = 0
@@ -124,12 +130,10 @@ local function startUpboardLoop(updateUIFn, setVisibleLabelFn)
 		while true do
 			if autoUpboardEnabled then
 				local holder = tryGetPlayAgainHolder()
-				local action = desiredUpboardAction(holder)
-
 				if setVisibleLabelFn then
 					setVisibleLabelFn(holder and holder.Visible or nil)
 				end
-
+				local action = desiredUpboardAction(holder)
 				fireUpboardAction(action, updateUIFn, false)
 			end
 			task.wait(0.2)
@@ -137,21 +141,17 @@ local function startUpboardLoop(updateUIFn, setVisibleLabelFn)
 	end)
 end
 
--- EndGame handler: reset upgrades + wait 5s + force upboard action (restart/leave)
+-- EndGame: reset upgrades, wait 5s, then force upboard action once
 local endGameTaskId = 0
 local function handleEndGame(updateUIFn, setVisibleLabelFn)
 	endGameTaskId += 1
 	local myId = endGameTaskId
 
-	-- Reset upgrades
-	nextIndex = 1
-	upgradeBusy = false
-	if updateUIFn then updateUIFn("Upgrade: Reset (EndGame)") end
+	resetUpgrades(updateUIFn)
 
 	task.delay(ENDGAME_DELAY, function()
 		if myId ~= endGameTaskId then return end
 
-		-- Try to get holder (it may appear after delay)
 		local holder = tryGetPlayAgainHolder()
 		if setVisibleLabelFn then
 			setVisibleLabelFn(holder and holder.Visible or nil)
@@ -167,18 +167,18 @@ local function handleEndGame(updateUIFn, setVisibleLabelFn)
 			end
 		end
 
-		local action
-		if holder then
-			action = holder.Visible and "PlayAgain" or "Leave"
-		else
-			action = "Leave" -- fallback
-		end
+		local action = (holder and holder.Visible) and "PlayAgain" or "Leave"
 
 		-- Force fire (ignore lastAction/cooldown)
 		upboardLastAction = nil
 		upboardLastFireAt = 0
 		fireUpboardAction(action, updateUIFn, true)
 	end)
+end
+
+-- TurnOffBoard: just reset upgrades index
+local function handleTurnOffBoard(updateUIFn)
+	resetUpgrades(updateUIFn)
 end
 
 -- ===================== ONE GUI =====================
@@ -360,21 +360,22 @@ end)
 upboardToggle.MouseButton1Click:Connect(function()
 	autoUpboardEnabled = not autoUpboardEnabled
 	if autoUpboardEnabled then
-		-- allow immediate action when turning ON
 		upboardLastAction = nil
 		upboardLastFireAt = 0
 	end
 	updateUI()
 end)
 
--- Listen for EndGame signal from server -> reset upgrades and force upboard after 5s
+-- Listen for server -> client signals
 UpboardRemote.OnClientEvent:Connect(function(action, ...)
 	if action == "EndGame" then
 		handleEndGame(updateUI, setVisibleLabel)
+	elseif action == "TurnOffBoard" then
+		handleTurnOffBoard(updateUI)
 	end
 end)
 
--- Start upboard loop once (it will only act when toggle ON)
+-- Start constant upboard checking (only acts when toggle ON)
 startUpboardLoop(updateUI, setVisibleLabel)
 
 updateUI()
