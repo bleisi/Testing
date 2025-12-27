@@ -1,0 +1,340 @@
+--// ONE GUI - TWO TOGGLES (Auto Upgrade Preset + Auto Upboard PlayAgain/Leave)
+-- Put this LocalScript in StarterPlayerScripts
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local MoneyRemote = Remotes:WaitForChild("Money")
+local ChampionRemote = Remotes:WaitForChild("Champion")
+local UpboardRemote = Remotes:WaitForChild("Upboard")
+
+-- ===================== CONFIG =====================
+local thresholds = {975, 1150, 1725, 2010, 2530, 2750}
+
+local PRESET_ATTRIBUTE_KEY = "Champion"
+local PRESET_ATTRIBUTE_VALUE = "Blade Master" -- change to "blademaster" if needed
+
+-- ===================== SHARED HELPERS =====================
+local function norm(v)
+	return tostring(v or ""):lower():gsub("%s+", "")
+end
+
+-- ===================== FEATURE 1: AUTO UPGRADE PRESET =====================
+local autoUpgradeEnabled = false
+local currentMoney = 0
+local nextIndex = 1
+local upgradeBusy = false
+
+local function findTargetPreset()
+	local presets = Workspace:WaitForChild("Presets")
+	local wantVal = norm(PRESET_ATTRIBUTE_VALUE)
+
+	for _, preset in ipairs(presets:GetChildren()) do
+		local attr = preset:GetAttribute(PRESET_ATTRIBUTE_KEY)
+		if attr ~= nil and norm(attr) == wantVal then
+			return preset
+		end
+	end
+
+	return nil
+end
+
+local function fireUpgradePreset()
+	local preset = findTargetPreset()
+	if not preset then
+		return false, "Preset not found"
+	end
+
+	ChampionRemote:FireServer("Upgrade", preset)
+	return true, "Sent Upgrade"
+end
+
+local function processUpgrades(updateUIFn)
+	if not autoUpgradeEnabled then return end
+	if upgradeBusy then return end
+	if nextIndex > #thresholds then return end
+
+	upgradeBusy = true
+
+	while autoUpgradeEnabled
+		and nextIndex <= #thresholds
+		and (currentMoney + 1e-6) >= thresholds[nextIndex]
+	do
+		local target = thresholds[nextIndex]
+		if updateUIFn then updateUIFn(("Upgrade: Upgrading @ %d..."):format(target)) end
+
+		local ok, msg = fireUpgradePreset()
+		if not ok then
+			if updateUIFn then updateUIFn("Upgrade: " .. msg) end
+			break
+		end
+
+		nextIndex += 1
+		task.wait(0.25)
+	end
+
+	upgradeBusy = false
+end
+
+-- ===================== FEATURE 2: AUTO UPBOARD PLAYAGAIN/LEAVE =====================
+local autoUpboardEnabled = false
+local lastVisibleState = nil
+local upboardBusy = false
+
+local function getTargetGuiObject()
+	local upboard = playerGui:WaitForChild("Upboard")
+	local result = upboard:WaitForChild("Result")
+	local main = result:WaitForChild("Main")
+	local options = main:WaitForChild("Options")
+	local holder = options:WaitForChild("PlayAgainButtonHolder")
+	return holder
+end
+
+local function fireUpboardAction(isVisible, updateUIFn)
+	if upboardBusy then return end
+	upboardBusy = true
+
+	if isVisible then
+		UpboardRemote:FireServer("PlayAgain")
+		if updateUIFn then updateUIFn("Upboard: Sent PlayAgain") end
+	else
+		UpboardRemote:FireServer("Leave")
+		if updateUIFn then updateUIFn("Upboard: Sent Leave") end
+	end
+
+	task.delay(0.35, function()
+		upboardBusy = false
+	end)
+end
+
+local function hookVisibleWatcher(updateUIFn)
+	local holder = getTargetGuiObject()
+	lastVisibleState = holder.Visible
+
+	holder:GetPropertyChangedSignal("Visible"):Connect(function()
+		local now = holder.Visible
+		if updateUIFn then updateUIFn(nil, now) end -- update visible label
+
+		if not autoUpboardEnabled then
+			lastVisibleState = now
+			return
+		end
+
+		if now ~= lastVisibleState then
+			lastVisibleState = now
+			fireUpboardAction(now, updateUIFn)
+		end
+	end)
+
+	-- If already enabled, fire once immediately
+	if autoUpboardEnabled then
+		fireUpboardAction(holder.Visible, updateUIFn)
+	end
+end
+
+-- ===================== ONE GUI =====================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VIP_MultiAutoGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 340, 0, 210)
+frame.Position = UDim2.new(0, 20, 0.5, -105)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 28)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 24)
+title.Position = UDim2.new(0, 10, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = "VIP Auto Panel (2 Toggles)"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+-- Upgrade section labels
+local upgradeStatus = Instance.new("TextLabel")
+upgradeStatus.Size = UDim2.new(1, -20, 0, 18)
+upgradeStatus.Position = UDim2.new(0, 10, 0, 38)
+upgradeStatus.BackgroundTransparency = 1
+upgradeStatus.Text = "Upgrade: OFF"
+upgradeStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+upgradeStatus.Font = Enum.Font.Gotham
+upgradeStatus.TextSize = 13
+upgradeStatus.TextXAlignment = Enum.TextXAlignment.Left
+upgradeStatus.Parent = frame
+
+local moneyLabel = Instance.new("TextLabel")
+moneyLabel.Size = UDim2.new(1, -20, 0, 18)
+moneyLabel.Position = UDim2.new(0, 10, 0, 58)
+moneyLabel.BackgroundTransparency = 1
+moneyLabel.Text = "Money: 0"
+moneyLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+moneyLabel.Font = Enum.Font.Gotham
+moneyLabel.TextSize = 13
+moneyLabel.TextXAlignment = Enum.TextXAlignment.Left
+moneyLabel.Parent = frame
+
+local nextLabel = Instance.new("TextLabel")
+nextLabel.Size = UDim2.new(1, -20, 0, 18)
+nextLabel.Position = UDim2.new(0, 10, 0, 78)
+nextLabel.BackgroundTransparency = 1
+nextLabel.Text = "Next: 975"
+nextLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+nextLabel.Font = Enum.Font.Gotham
+nextLabel.TextSize = 13
+nextLabel.TextXAlignment = Enum.TextXAlignment.Left
+nextLabel.Parent = frame
+
+local presetLabel = Instance.new("TextLabel")
+presetLabel.Size = UDim2.new(1, -20, 0, 18)
+presetLabel.Position = UDim2.new(0, 10, 0, 98)
+presetLabel.BackgroundTransparency = 1
+presetLabel.Text = "Preset: (searching...)"
+presetLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+presetLabel.Font = Enum.Font.Gotham
+presetLabel.TextSize = 12
+presetLabel.TextXAlignment = Enum.TextXAlignment.Left
+presetLabel.Parent = frame
+
+-- Upboard section labels
+local upboardStatus = Instance.new("TextLabel")
+upboardStatus.Size = UDim2.new(1, -20, 0, 18)
+upboardStatus.Position = UDim2.new(0, 10, 0, 128)
+upboardStatus.BackgroundTransparency = 1
+upboardStatus.Text = "Upboard: OFF"
+upboardStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+upboardStatus.Font = Enum.Font.Gotham
+upboardStatus.TextSize = 13
+upboardStatus.TextXAlignment = Enum.TextXAlignment.Left
+upboardStatus.Parent = frame
+
+local visibleLabel = Instance.new("TextLabel")
+visibleLabel.Size = UDim2.new(1, -20, 0, 18)
+visibleLabel.Position = UDim2.new(0, 10, 0, 148)
+visibleLabel.BackgroundTransparency = 1
+visibleLabel.Text = "PlayAgainButtonHolder.Visible: ?"
+visibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+visibleLabel.Font = Enum.Font.Gotham
+visibleLabel.TextSize = 12
+visibleLabel.TextXAlignment = Enum.TextXAlignment.Left
+visibleLabel.Parent = frame
+
+-- Buttons
+local upgradeToggle = Instance.new("TextButton")
+upgradeToggle.Size = UDim2.new(0.5, -15, 0, 34)
+upgradeToggle.Position = UDim2.new(0, 10, 1, -44)
+upgradeToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
+upgradeToggle.BorderSizePixel = 0
+upgradeToggle.Text = "Upgrade: OFF"
+upgradeToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+upgradeToggle.Font = Enum.Font.GothamBold
+upgradeToggle.TextSize = 14
+upgradeToggle.Parent = frame
+
+local upboardToggle = Instance.new("TextButton")
+upboardToggle.Size = UDim2.new(0.5, -15, 0, 34)
+upboardToggle.Position = UDim2.new(0.5, 5, 1, -44)
+upboardToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
+upboardToggle.BorderSizePixel = 0
+upboardToggle.Text = "Upboard: OFF"
+upboardToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+upboardToggle.Font = Enum.Font.GothamBold
+upboardToggle.TextSize = 14
+upboardToggle.Parent = frame
+
+local c1 = Instance.new("UICorner")
+c1.CornerRadius = UDim.new(0, 10)
+c1.Parent = upgradeToggle
+
+local c2 = Instance.new("UICorner")
+c2.CornerRadius = UDim.new(0, 10)
+c2.Parent = upboardToggle
+
+-- UI updater (single place)
+local function updateUI(statusText, visibleState)
+	-- money / upgrade info
+	moneyLabel.Text = ("Money: %d"):format(math.floor(currentMoney + 0.5))
+	local nextTarget = thresholds[nextIndex]
+	nextLabel.Text = nextTarget and ("Next: %d"):format(nextTarget) or "Next: DONE"
+
+	local preset = findTargetPreset()
+	presetLabel.Text = ("Preset: %s"):format(preset and preset.Name or "(not found)")
+
+	-- visible state
+	if visibleState ~= nil then
+		visibleLabel.Text = "PlayAgainButtonHolder.Visible: " .. tostring(visibleState)
+	end
+
+	-- toggles status
+	upgradeStatus.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+	upboardStatus.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
+
+	upgradeToggle.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+	upgradeToggle.BackgroundColor3 = autoUpgradeEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	upboardToggle.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
+	upboardToggle.BackgroundColor3 = autoUpboardEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	-- optional status override line (show latest action)
+	if statusText then
+		-- put it into the two status labels based on prefix if you want
+		if statusText:sub(1, 7) == "Upgrade" then
+			upgradeStatus.Text = statusText
+		elseif statusText:sub(1, 6) == "Upboard" then
+			upboardStatus.Text = statusText
+		end
+	end
+end
+
+-- ===================== HOOK EVENTS =====================
+MoneyRemote.OnClientEvent:Connect(function(action, amount)
+	if action ~= "Update" then return end
+	currentMoney = tonumber(amount) or 0
+	updateUI()
+
+	processUpgrades(updateUI)
+end)
+
+upgradeToggle.MouseButton1Click:Connect(function()
+	autoUpgradeEnabled = not autoUpgradeEnabled
+	updateUI()
+
+	-- if turned on, try immediately
+	processUpgrades(updateUI)
+end)
+
+upboardToggle.MouseButton1Click:Connect(function()
+	autoUpboardEnabled = not autoUpboardEnabled
+	updateUI()
+
+	-- when turning on, send correct action once immediately
+	if autoUpboardEnabled then
+		local holder = getTargetGuiObject()
+		updateUI(nil, holder.Visible)
+		lastVisibleState = holder.Visible
+		fireUpboardAction(holder.Visible, updateUI)
+	end
+end)
+
+-- start watcher once
+task.spawn(function()
+	local holder = getTargetGuiObject()
+	updateUI(nil, holder.Visible)
+	hookVisibleWatcher(updateUI)
+end)
+
+updateUI()
