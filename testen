@@ -1,4 +1,4 @@
---// ONE GUI - TWO TOGGLES (Auto Upgrade Preset + Auto Upboard PlayAgain/Leave)
+--// ONE GUI - TWO TOGGLES (FINAL MERGED + EndGame reset/auto upboard after 5s)
 -- Put this LocalScript in StarterPlayerScripts
 
 local Players = game:GetService("Players")
@@ -15,11 +15,13 @@ local UpboardRemote = Remotes:WaitForChild("Upboard")
 
 -- ===================== CONFIG =====================
 local thresholds = {975, 1150, 1725, 2010, 2530, 2750}
-
 local PRESET_ATTRIBUTE_KEY = "Champion"
-local PRESET_ATTRIBUTE_VALUE = "Blade Master" -- change to "blademaster" if needed
+local PRESET_ATTRIBUTE_VALUE = "Blade Master" -- change if needed (e.g. "blademaster")
 
--- ===================== SHARED HELPERS =====================
+local UPBOARD_COOLDOWN = 0.75
+local ENDGAME_DELAY = 5
+
+-- ===================== HELPERS =====================
 local function norm(v)
 	return tostring(v or ""):lower():gsub("%s+", "")
 end
@@ -40,18 +42,16 @@ local function findTargetPreset()
 			return preset
 		end
 	end
-
 	return nil
 end
 
 local function fireUpgradePreset()
 	local preset = findTargetPreset()
 	if not preset then
-		return false, "Preset not found"
+		return false, "Upgrade: Preset not found"
 	end
-
 	ChampionRemote:FireServer("Upgrade", preset)
-	return true, "Sent Upgrade"
+	return true, "Upgrade: Sent Upgrade"
 end
 
 local function processUpgrades(updateUIFn)
@@ -70,7 +70,7 @@ local function processUpgrades(updateUIFn)
 
 		local ok, msg = fireUpgradePreset()
 		if not ok then
-			if updateUIFn then updateUIFn("Upgrade: " .. msg) end
+			if updateUIFn then updateUIFn(msg) end
 			break
 		end
 
@@ -81,60 +81,104 @@ local function processUpgrades(updateUIFn)
 	upgradeBusy = false
 end
 
--- ===================== FEATURE 2: AUTO UPBOARD PLAYAGAIN/LEAVE =====================
+-- ===================== FEATURE 2: AUTO UPBOARD (LOOP + ENDGAME TRIGGER) =====================
 local autoUpboardEnabled = false
-local lastVisibleState = nil
-local upboardBusy = false
+local upboardLastAction = nil
+local upboardLastFireAt = 0
 
-local function getTargetGuiObject()
-	local upboard = playerGui:WaitForChild("Upboard")
-	local result = upboard:WaitForChild("Result")
-	local main = result:WaitForChild("Main")
-	local options = main:WaitForChild("Options")
-	local holder = options:WaitForChild("PlayAgainButtonHolder")
-	return holder
+local function tryGetPlayAgainHolder()
+	local upboard = playerGui:FindFirstChild("Upboard")
+	if not upboard then return nil end
+	local result = upboard:FindFirstChild("Result")
+	if not result then return nil end
+	local main = result:FindFirstChild("Main")
+	if not main then return nil end
+	local options = main:FindFirstChild("Options")
+	if not options then return nil end
+	return options:FindFirstChild("PlayAgainButtonHolder")
 end
 
-local function fireUpboardAction(isVisible, updateUIFn)
-	if upboardBusy then return end
-	upboardBusy = true
+local function desiredUpboardAction(holder)
+	if not holder then return nil end
+	return holder.Visible and "PlayAgain" or "Leave"
+end
 
-	if isVisible then
-		UpboardRemote:FireServer("PlayAgain")
-		if updateUIFn then updateUIFn("Upboard: Sent PlayAgain") end
-	else
-		UpboardRemote:FireServer("Leave")
-		if updateUIFn then updateUIFn("Upboard: Sent Leave") end
+local function fireUpboardAction(action, updateUIFn, force)
+	if not action then return end
+
+	local now = os.clock()
+	if not force then
+		if now - upboardLastFireAt < UPBOARD_COOLDOWN then return end
+		if action == upboardLastAction then return end
 	end
 
-	task.delay(0.35, function()
-		upboardBusy = false
+	upboardLastAction = action
+	upboardLastFireAt = now
+
+	UpboardRemote:FireServer(action)
+	if updateUIFn then updateUIFn(("Upboard: Sent %s"):format(action)) end
+end
+
+local function startUpboardLoop(updateUIFn, setVisibleLabelFn)
+	task.spawn(function()
+		while true do
+			if autoUpboardEnabled then
+				local holder = tryGetPlayAgainHolder()
+				local action = desiredUpboardAction(holder)
+
+				if setVisibleLabelFn then
+					setVisibleLabelFn(holder and holder.Visible or nil)
+				end
+
+				fireUpboardAction(action, updateUIFn, false)
+			end
+			task.wait(0.2)
+		end
 	end)
 end
 
-local function hookVisibleWatcher(updateUIFn)
-	local holder = getTargetGuiObject()
-	lastVisibleState = holder.Visible
+-- EndGame handler: reset upgrades + wait 5s + force upboard action (restart/leave)
+local endGameTaskId = 0
+local function handleEndGame(updateUIFn, setVisibleLabelFn)
+	endGameTaskId += 1
+	local myId = endGameTaskId
 
-	holder:GetPropertyChangedSignal("Visible"):Connect(function()
-		local now = holder.Visible
-		if updateUIFn then updateUIFn(nil, now) end -- update visible label
+	-- Reset upgrades
+	nextIndex = 1
+	upgradeBusy = false
+	if updateUIFn then updateUIFn("Upgrade: Reset (EndGame)") end
 
-		if not autoUpboardEnabled then
-			lastVisibleState = now
-			return
+	task.delay(ENDGAME_DELAY, function()
+		if myId ~= endGameTaskId then return end
+
+		-- Try to get holder (it may appear after delay)
+		local holder = tryGetPlayAgainHolder()
+		if setVisibleLabelFn then
+			setVisibleLabelFn(holder and holder.Visible or nil)
 		end
 
-		if now ~= lastVisibleState then
-			lastVisibleState = now
-			fireUpboardAction(now, updateUIFn)
+		local tries = 0
+		while (not holder) and tries < 20 do
+			task.wait(0.25)
+			holder = tryGetPlayAgainHolder()
+			tries += 1
+			if setVisibleLabelFn then
+				setVisibleLabelFn(holder and holder.Visible or nil)
+			end
 		end
+
+		local action
+		if holder then
+			action = holder.Visible and "PlayAgain" or "Leave"
+		else
+			action = "Leave" -- fallback
+		end
+
+		-- Force fire (ignore lastAction/cooldown)
+		upboardLastAction = nil
+		upboardLastFireAt = 0
+		fireUpboardAction(action, updateUIFn, true)
 	end)
-
-	-- If already enabled, fire once immediately
-	if autoUpboardEnabled then
-		fireUpboardAction(holder.Visible, updateUIFn)
-	end
 end
 
 -- ===================== ONE GUI =====================
@@ -165,7 +209,7 @@ title.TextSize = 16
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = frame
 
--- Upgrade section labels
+-- Upgrade section
 local upgradeStatus = Instance.new("TextLabel")
 upgradeStatus.Size = UDim2.new(1, -20, 0, 18)
 upgradeStatus.Position = UDim2.new(0, 10, 0, 38)
@@ -210,7 +254,7 @@ presetLabel.TextSize = 12
 presetLabel.TextXAlignment = Enum.TextXAlignment.Left
 presetLabel.Parent = frame
 
--- Upboard section labels
+-- Upboard section
 local upboardStatus = Instance.new("TextLabel")
 upboardStatus.Size = UDim2.new(1, -20, 0, 18)
 upboardStatus.Position = UDim2.new(0, 10, 0, 128)
@@ -226,7 +270,7 @@ local visibleLabel = Instance.new("TextLabel")
 visibleLabel.Size = UDim2.new(1, -20, 0, 18)
 visibleLabel.Position = UDim2.new(0, 10, 0, 148)
 visibleLabel.BackgroundTransparency = 1
-visibleLabel.Text = "PlayAgainButtonHolder.Visible: ?"
+visibleLabel.Text = "PlayAgainButtonHolder.Visible: (waiting...)"
 visibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
 visibleLabel.Font = Enum.Font.Gotham
 visibleLabel.TextSize = 12
@@ -264,9 +308,16 @@ local c2 = Instance.new("UICorner")
 c2.CornerRadius = UDim.new(0, 10)
 c2.Parent = upboardToggle
 
--- UI updater (single place)
-local function updateUI(statusText, visibleState)
-	-- money / upgrade info
+-- UI functions
+local function setVisibleLabel(v)
+	if v == nil then
+		visibleLabel.Text = "PlayAgainButtonHolder.Visible: (waiting...)"
+	else
+		visibleLabel.Text = "PlayAgainButtonHolder.Visible: " .. tostring(v)
+	end
+end
+
+local function updateUI(statusText)
 	moneyLabel.Text = ("Money: %d"):format(math.floor(currentMoney + 0.5))
 	local nextTarget = thresholds[nextIndex]
 	nextLabel.Text = nextTarget and ("Next: %d"):format(nextTarget) or "Next: DONE"
@@ -274,67 +325,56 @@ local function updateUI(statusText, visibleState)
 	local preset = findTargetPreset()
 	presetLabel.Text = ("Preset: %s"):format(preset and preset.Name or "(not found)")
 
-	-- visible state
-	if visibleState ~= nil then
-		visibleLabel.Text = "PlayAgainButtonHolder.Visible: " .. tostring(visibleState)
-	end
-
-	-- toggles status
-	upgradeStatus.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
-	upboardStatus.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
-
 	upgradeToggle.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
 	upgradeToggle.BackgroundColor3 = autoUpgradeEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
 
 	upboardToggle.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
 	upboardToggle.BackgroundColor3 = autoUpboardEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
 
-	-- optional status override line (show latest action)
 	if statusText then
-		-- put it into the two status labels based on prefix if you want
 		if statusText:sub(1, 7) == "Upgrade" then
 			upgradeStatus.Text = statusText
 		elseif statusText:sub(1, 6) == "Upboard" then
 			upboardStatus.Text = statusText
 		end
+	else
+		upgradeStatus.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+		upboardStatus.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
 	end
 end
 
--- ===================== HOOK EVENTS =====================
+-- ===================== EVENTS =====================
 MoneyRemote.OnClientEvent:Connect(function(action, amount)
 	if action ~= "Update" then return end
 	currentMoney = tonumber(amount) or 0
 	updateUI()
-
 	processUpgrades(updateUI)
 end)
 
 upgradeToggle.MouseButton1Click:Connect(function()
 	autoUpgradeEnabled = not autoUpgradeEnabled
 	updateUI()
-
-	-- if turned on, try immediately
 	processUpgrades(updateUI)
 end)
 
 upboardToggle.MouseButton1Click:Connect(function()
 	autoUpboardEnabled = not autoUpboardEnabled
-	updateUI()
-
-	-- when turning on, send correct action once immediately
 	if autoUpboardEnabled then
-		local holder = getTargetGuiObject()
-		updateUI(nil, holder.Visible)
-		lastVisibleState = holder.Visible
-		fireUpboardAction(holder.Visible, updateUI)
+		-- allow immediate action when turning ON
+		upboardLastAction = nil
+		upboardLastFireAt = 0
+	end
+	updateUI()
+end)
+
+-- Listen for EndGame signal from server -> reset upgrades and force upboard after 5s
+UpboardRemote.OnClientEvent:Connect(function(action, ...)
+	if action == "EndGame" then
+		handleEndGame(updateUI, setVisibleLabel)
 	end
 end)
 
--- start watcher once
-task.spawn(function()
-	local holder = getTargetGuiObject()
-	updateUI(nil, holder.Visible)
-	hookVisibleWatcher(updateUI)
-end)
+-- Start upboard loop once (it will only act when toggle ON)
+startUpboardLoop(updateUI, setVisibleLabel)
 
 updateUI()
