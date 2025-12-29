@@ -50,7 +50,10 @@ local PRESET_ATTRIBUTE_VALUE = "Blade Master"
 
 local UPBOARD_COOLDOWN = 0.75
 local UPBOARD_LOOP_INTERVAL = 0.9
-local ENDGAME_DELAY = 10 -- <-- waits 10 seconds before PlayAgain/Leave
+local ENDGAME_DELAY = 10 -- waits 10 seconds before PlayAgain/Leave
+
+-- After 15 minutes from script start, ALWAYS leave/return lobby on endgame
+local FORCE_LEAVE_AFTER_SECONDS = 15 * 60
 
 -- WaveSkip -> Place -> Vote
 local PLACE_ACTION = "Place"
@@ -126,6 +129,19 @@ local function stopAll()
 	maid:DoCleaning()
 end
 
+-- ===== 15 MINUTE FORCE-LEAVE TIMER =====
+local scriptStartAt = os.clock()
+local forceLeaveToLobby = false
+
+task.spawn(function()
+	while stillCurrent() do
+		if not forceLeaveToLobby and (os.clock() - scriptStartAt) >= FORCE_LEAVE_AFTER_SECONDS then
+			forceLeaveToLobby = true
+		end
+		task.wait(1)
+	end
+end)
+
 -- ===== PRESET CACHE (Blade Master) =====
 local presetsFolder = Workspace:WaitForChild("Presets")
 local cachedBladePreset = nil
@@ -170,7 +186,7 @@ local function getBladePreset()
 end
 
 -- ===== FEATURE 1: AUTO UPGRADE =====
-local autoUpgradeEnabled = true
+local autoUpgradeEnabled = false
 local currentMoney = 0
 local nextIndex = 1
 local upgradeBusy = false
@@ -230,6 +246,9 @@ local function tryGetPlayAgainHolder()
 end
 
 local function desiredUpboardAction(holder)
+	if forceLeaveToLobby then
+		return "Leave"
+	end
 	if not holder then return nil end
 	return holder.Visible and "PlayAgain" or "Leave"
 end
@@ -272,8 +291,7 @@ local function handleEndGame(updateUIFn, setPlayAgainVisibleLabelFn)
 	endGameTaskId += 1
 	local myId = endGameTaskId
 
-	-- Reset auto-upgrade fully (turn OFF + reset progress)
-	autoUpgradeEnabled = false
+	-- KEEP auto-upgrade as-is, but reset to first upgrade again
 	resetUpgrades(updateUIFn)
 	if updateUIFn then updateUIFn("Upgrade: Reset (EndGame)") end
 	if updateUIFn then updateUIFn() end
@@ -297,9 +315,13 @@ local function handleEndGame(updateUIFn, setPlayAgainVisibleLabelFn)
 			end
 		end
 
-		local action = (holder and holder.Visible) and "PlayAgain" or "Leave"
+		local action
+		if forceLeaveToLobby then
+			action = "Leave"
+		else
+			action = (holder and holder.Visible) and "PlayAgain" or "Leave"
+		end
 
-		-- Reset spam guards so it always fires once here
 		upboardLastAction = nil
 		upboardLastFireAt = 0
 		fireUpboardAction(action, updateUIFn, true)
