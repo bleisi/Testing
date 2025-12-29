@@ -1,0 +1,424 @@
+-- LocalScript inside StarterGui
+-- Draggable VIP GUI + TP to Sung + Challenge scan + Start + Leave
+-- START wired to: ReplicatedStorage["Lobby Relatives"].Doors:FireServer("Play","Challenge")
+-- LEAVE wired to: ReplicatedStorage["Lobby Relatives"].Doors:FireServer("Leave","Challenge")
+-- GUI is created first so it always shows (no infinite yield before UI)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+
+-- =======================
+-- CONFIG
+-- =======================
+local CHECK_INTERVAL = 0.25
+local TELEPORT_OFFSET_Y = 5
+
+-- TP priority (highest -> lowest)
+local TARGET_PRIORITY = {
+	"C_A_A_Power Fragment",
+	"C_A_A_Deluxe Dice",
+	"C_A_C_Dice",
+	"C_C_C_Gratifying Soul",
+}
+
+-- Teleport behavior:
+local RETRIGGER_DISTANCE = 35
+local TELEPORT_COOLDOWN = 2.0
+
+-- Start behavior:
+local PRESS_START_DISTANCE = 25
+local START_PRESS_COOLDOWN = 0.35
+
+-- NPC
+local NPC_FOLDER_PATH = { "NPCs", "Sung6S" }
+local R6_LEG = "Left Leg"
+local R15_LEG_CANDIDATES = { "LeftLowerLeg", "LeftUpperLeg" }
+
+-- Challenge Hourly IDs
+local HOURLY_IDS = { "Hourly_01_01", "Hourly_02_01", "Hourly_03_01" }
+
+-- ReplicatedStorage folder/remote
+local LOBBY_FOLDER_NAME = "Lobby Relatives"
+local DOORS_REMOTE_NAME = "Doors"
+
+-- Door remote args (confirmed)
+local START_A, START_B = "Play", "Challenge"
+local LEAVE_A, LEAVE_B = "Leave", "Challenge"
+
+-- =======================
+-- HELPERS
+-- =======================
+local function getChar()
+	return player.Character or player.CharacterAdded:Wait()
+end
+
+local function getHRP()
+	local char = getChar()
+	return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function teleportToPart(part)
+	local hrp = getHRP()
+	if hrp and part and part:IsA("BasePart") then
+		hrp.CFrame = part.CFrame * CFrame.new(0, TELEPORT_OFFSET_Y, 0)
+	end
+end
+
+local function findAncestorByName(inst, name)
+	local cur = inst
+	while cur do
+		if cur.Name == name then return cur end
+		cur = cur.Parent
+	end
+	return nil
+end
+
+local function distanceFromPlayerTo(part)
+	local hrp = getHRP()
+	if not hrp or not part then return math.huge end
+	return (hrp.Position - part.Position).Magnitude
+end
+
+local function getSungLeftLegPart()
+	local cur = workspace
+	for _, name in ipairs(NPC_FOLDER_PATH) do
+		cur = cur:FindFirstChild(name)
+		if not cur then return nil end
+	end
+
+	local leg = cur:FindFirstChild(R6_LEG)
+	if leg and leg:IsA("BasePart") then
+		return leg
+	end
+
+	for _, cand in ipairs(R15_LEG_CANDIDATES) do
+		local p = cur:FindFirstChild(cand)
+		if p and p:IsA("BasePart") then
+			return p
+		end
+	end
+
+	return nil
+end
+
+-- Non-yielding holder fetch
+local function tryGetHolderForHourly(hourlyId)
+	local doors = workspace:FindFirstChild("Doors")
+	if not doors then return nil end
+
+	local challenge = doors:FindFirstChild("Challenge")
+	if not challenge then return nil end
+
+	local hourly = challenge:FindFirstChild(hourlyId)
+	if not hourly then return nil end
+
+	local matchDisplayPart = hourly:FindFirstChild("MatchDisplayPart")
+	if not matchDisplayPart then return nil end
+
+	local surfaceGui = matchDisplayPart:FindFirstChild("SurfaceGui")
+	if not surfaceGui then return nil end
+
+	local frame = surfaceGui:FindFirstChild("MatchDisplayFrame")
+	if not frame then return nil end
+
+	local rewards = frame:FindFirstChild("ChallengeRewards")
+	if not rewards then return nil end
+
+	return rewards:FindFirstChild("Holder")
+end
+
+-- PRIORITY SCAN:
+-- returns (matchDisplayPart, foundTargetName) OR nil
+local function findBestMatchDisplayPart()
+	for _, targetName in ipairs(TARGET_PRIORITY) do
+		for _, hourlyId in ipairs(HOURLY_IDS) do
+			local holder = tryGetHolderForHourly(hourlyId)
+			if holder then
+				local found = holder:FindFirstChild(targetName, true)
+				if found then
+					local matchDisplayPart = findAncestorByName(holder, "MatchDisplayPart")
+					if matchDisplayPart and matchDisplayPart:IsA("BasePart") then
+						return matchDisplayPart, targetName
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- =======================
+-- GUI (CREATED IMMEDIATELY)
+-- =======================
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VIPPanelGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Name = "MainFrame"
+frame.Size = UDim2.new(0, 280, 0, 305)
+frame.Position = UDim2.new(0.15, 0, 0.35, 0)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 28)
+title.Position = UDim2.new(0, 10, 0, 6)
+title.BackgroundTransparency = 1
+title.Text = "VIP Panel"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextScaled = true
+title.Font = Enum.Font.GothamBold
+title.Parent = frame
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 20)
+status.Position = UDim2.new(0, 10, 0, 34)
+status.BackgroundTransparency = 1
+status.Text = "Status: Ready"
+status.TextColor3 = Color3.fromRGB(200, 200, 200)
+status.TextScaled = true
+status.Font = Enum.Font.Gotham
+status.Parent = frame
+
+local tpNpcBtn = Instance.new("TextButton")
+tpNpcBtn.Size = UDim2.new(1, -20, 0, 44)
+tpNpcBtn.Position = UDim2.new(0, 10, 0, 60)
+tpNpcBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 250)
+tpNpcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+tpNpcBtn.TextScaled = true
+tpNpcBtn.Font = Enum.Font.GothamBold
+tpNpcBtn.Text = "TP to Sung6S Left Leg"
+tpNpcBtn.Parent = frame
+Instance.new("UICorner", tpNpcBtn).CornerRadius = UDim.new(0, 8)
+
+local challengeBtn = Instance.new("TextButton")
+challengeBtn.Size = UDim2.new(1, -20, 0, 44)
+challengeBtn.Position = UDim2.new(0, 10, 0, 112)
+challengeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+challengeBtn.TextScaled = true
+challengeBtn.Font = Enum.Font.GothamBold
+challengeBtn.Parent = frame
+Instance.new("UICorner", challengeBtn).CornerRadius = UDim.new(0, 8)
+
+local startBtn = Instance.new("TextButton")
+startBtn.Size = UDim2.new(1, -20, 0, 40)
+startBtn.Position = UDim2.new(0, 10, 0, 166)
+startBtn.BackgroundColor3 = Color3.fromRGB(240, 170, 60)
+startBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+startBtn.TextScaled = true
+startBtn.Font = Enum.Font.GothamBold
+startBtn.Text = "START"
+startBtn.Parent = frame
+Instance.new("UICorner", startBtn).CornerRadius = UDim.new(0, 8)
+
+local leaveBtn = Instance.new("TextButton")
+leaveBtn.Size = UDim2.new(1, -20, 0, 40)
+leaveBtn.Position = UDim2.new(0, 10, 0, 212)
+leaveBtn.BackgroundColor3 = Color3.fromRGB(220, 70, 70)
+leaveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+leaveBtn.TextScaled = true
+leaveBtn.Font = Enum.Font.GothamBold
+leaveBtn.Text = "LEAVE"
+leaveBtn.Parent = frame
+Instance.new("UICorner", leaveBtn).CornerRadius = UDim.new(0, 8)
+
+local autoStartBtn = Instance.new("TextButton")
+autoStartBtn.Size = UDim2.new(1, -20, 0, 40)
+autoStartBtn.Position = UDim2.new(0, 10, 0, 258)
+autoStartBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+autoStartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+autoStartBtn.TextScaled = true
+autoStartBtn.Font = Enum.Font.GothamBold
+autoStartBtn.Text = "Auto-Start: OFF"
+autoStartBtn.Parent = frame
+Instance.new("UICorner", autoStartBtn).CornerRadius = UDim.new(0, 8)
+
+-- =======================
+-- DRAGGING
+-- =======================
+local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+local function updateDrag(input)
+	local delta = input.Position - dragStart
+	frame.Position = UDim2.new(
+		startPos.X.Scale, startPos.X.Offset + delta.X,
+		startPos.Y.Scale, startPos.Y.Offset + delta.Y
+	)
+end
+
+frame.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = frame.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end
+end)
+
+frame.InputChanged:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		dragInput = input
+	end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+	if dragging and input == dragInput then
+		updateDrag(input)
+	end
+end)
+
+-- =======================
+-- DOORS REMOTE (SAFE LOOKUP)
+-- =======================
+local function getDoorsRemote()
+	local lobby = ReplicatedStorage:FindFirstChild(LOBBY_FOLDER_NAME)
+	local r = lobby and lobby:FindFirstChild(DOORS_REMOTE_NAME) or nil
+	if r and r:IsA("RemoteEvent") then return r end
+	return nil
+end
+
+local function requestStart()
+	local doors = getDoorsRemote()
+	if not doors then
+		status.Text = "Status: Doors remote not found!"
+		return false
+	end
+	doors:FireServer(START_A, START_B)
+	return true
+end
+
+local function requestLeave()
+	local doors = getDoorsRemote()
+	if not doors then
+		status.Text = "Status: Doors remote not found!"
+		return false
+	end
+	doors:FireServer(LEAVE_A, LEAVE_B) -- Leave (not Exit)
+	return true
+end
+
+-- =======================
+-- BUTTON LOGIC
+-- =======================
+tpNpcBtn.MouseButton1Click:Connect(function()
+	status.Text = "Status: Looking for Sung6S..."
+	local leftLeg = getSungLeftLegPart()
+	if leftLeg then
+		teleportToPart(leftLeg)
+		status.Text = "Status: Teleported to Sung6S"
+	else
+		status.Text = "Status: Sung6S not loaded yet"
+	end
+end)
+
+local challengeEnabled = false
+local autoStartEnabled = false
+
+local lastTargetPart = nil
+local lastTeleportTime = 0
+local lastStartPressTime = 0
+
+local function updateChallengeText()
+	if challengeEnabled then
+		challengeBtn.Text = "Challenge Check: ON"
+		challengeBtn.BackgroundColor3 = Color3.fromRGB(70, 140, 70)
+	else
+		challengeBtn.Text = "Challenge Check: OFF"
+		challengeBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+	end
+end
+updateChallengeText()
+
+local function updateAutoStartText()
+	if autoStartEnabled then
+		autoStartBtn.Text = "Auto-Start: ON"
+		autoStartBtn.BackgroundColor3 = Color3.fromRGB(70, 140, 70)
+	else
+		autoStartBtn.Text = "Auto-Start: OFF"
+		autoStartBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+	end
+end
+updateAutoStartText()
+
+challengeBtn.MouseButton1Click:Connect(function()
+	challengeEnabled = not challengeEnabled
+	updateChallengeText()
+	status.Text = challengeEnabled and "Status: Challenge check enabled" or "Status: Ready"
+	lastTeleportTime = 0
+	lastStartPressTime = 0
+end)
+
+autoStartBtn.MouseButton1Click:Connect(function()
+	autoStartEnabled = not autoStartEnabled
+	updateAutoStartText()
+	status.Text = autoStartEnabled and "Status: Auto-start enabled" or "Status: Auto-start disabled"
+	lastStartPressTime = 0
+end)
+
+startBtn.MouseButton1Click:Connect(function()
+	if requestStart() then
+		status.Text = "Status: Start requested (manual)"
+	end
+end)
+
+leaveBtn.MouseButton1Click:Connect(function()
+	if requestLeave() then
+		status.Text = "Status: Leave requested"
+	end
+end)
+
+-- =======================
+-- MAIN LOOP (Challenge scan + TP + optional Auto-Start)
+-- =======================
+task.spawn(function()
+	while true do
+		task.wait(CHECK_INTERVAL)
+
+		if not challengeEnabled then
+			continue
+		end
+
+		local targetPart, foundName = findBestMatchDisplayPart()
+		if not targetPart then
+			status.Text = "Status: Waiting for Challenge area..."
+			continue
+		end
+
+		local now = os.clock()
+		local dist = distanceFromPlayerTo(targetPart)
+
+		-- Teleport logic
+		local cooldownOk = (now - lastTeleportTime) >= TELEPORT_COOLDOWN
+		local rearmOk = (targetPart ~= lastTargetPart) or (dist >= RETRIGGER_DISTANCE)
+
+		if cooldownOk and rearmOk then
+			lastTargetPart = targetPart
+			lastTeleportTime = now
+			status.Text = ("Status: %s found! Teleporting..."):format(foundName)
+			teleportToPart(targetPart)
+			dist = distanceFromPlayerTo(targetPart)
+		end
+
+		-- Auto-start when close enough
+		if autoStartEnabled and dist <= PRESS_START_DISTANCE then
+			if (now - lastStartPressTime) >= START_PRESS_COOLDOWN then
+				lastStartPressTime = now
+				if requestStart() then
+					status.Text = ("Status: Auto-Start (%s @ %.0f studs)"):format(foundName, dist)
+				end
+			end
+		else
+			status.Text = ("Status: %s (%.0f studs)"):format(foundName, dist)
+		end
+	end
+end)
