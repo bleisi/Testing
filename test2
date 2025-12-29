@@ -170,7 +170,7 @@ local function getBladePreset()
 end
 
 -- ===== FEATURE 1: AUTO UPGRADE =====
-local autoUpgradeEnabled = false
+local autoUpgradeEnabled = true
 local currentMoney = 0
 local nextIndex = 1
 local upgradeBusy = false
