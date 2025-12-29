@@ -1,5 +1,6 @@
--- VIP MERGED: Multi Auto + Challenge TP Panel (Singleton + Anti-Crash Auto-Rejoin)
+-- VIP UNIFIED FINAL (Single GUI + Draggable)
 -- Put this LocalScript in StarterPlayerScripts
+-- Change requested: Challenge Check starts ON.
 
 -- ===== SINGLETON GUARD =====
 do
@@ -30,14 +31,12 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- remove old guis from previous runs
+-- remove old gui from previous runs
 pcall(function()
-	local old = playerGui:FindFirstChild("VIP_MultiAutoGui")
-	if old then old:Destroy() end
-end)
-pcall(function()
-	local old = playerGui:FindFirstChild("VIPPanelGui")
-	if old then old:Destroy() end
+	for _, n in ipairs({ "VIP_MultiAutoGui", "VIPPanelGui", "VIPUnifiedGui" }) do
+		local old = playerGui:FindFirstChild(n)
+		if old then old:Destroy() end
+	end
 end)
 
 -- ===== REMOTES =====
@@ -48,14 +47,14 @@ local UpboardRemote = Remotes:WaitForChild("Upboard")
 local TilePlacementRemote = Remotes:WaitForChild("TilePlacement")
 
 -- ===== CONFIG (MultiAuto) =====
-local thresholds = {975, 1150, 1725, 2010, 2530, 2750}
+local thresholds = { 975, 1150, 1725, 2010, 2530, 2750 }
 
 local PRESET_ATTRIBUTE_KEY = "Champion"
 local PRESET_ATTRIBUTE_VALUE = "Blade Master"
 
 local UPBOARD_COOLDOWN = 0.75
 local UPBOARD_LOOP_INTERVAL = 0.9
-local ENDGAME_DELAY = 10 -- waits 10 seconds before PlayAgain/Leave
+local ENDGAME_DELAY = 10 -- wait before PlayAgain/Leave
 
 -- After 15 minutes from script start, ALWAYS leave/return lobby on endgame
 local FORCE_LEAVE_AFTER_SECONDS = 15 * 60
@@ -70,18 +69,18 @@ local PLACE_CFRAME = CFrame.new(
 	0, 1, 0,
 	-1, 0, 0
 )
-local PLACE_TILE = Workspace:WaitForChild("Arena"):WaitForChild("PlacementTile_1_3")
+local PLACE_TILE_NAME = "PlacementTile_1_3"
 local PLACE_ZERO = 0
 local AFTER_PLACE_WAIT = 0.35
 local MAX_PLACE_TRIES_THIS_WAVESKIP = 3
 
 -- Auto-Rejoin (Anti-crash)
 local autoRejoinEnabled = true
-local REJOIN_AT_MB = 4800
+local REJOIN_AT_MB = 3500
 local REJOIN_CONFIRM_SECONDS = 8
 local REJOIN_COOLDOWN_SECONDS = 120
 
--- ===== CONFIG (Challenge TP Panel) =====
+-- ===== CONFIG (Challenge) =====
 local CHECK_INTERVAL = 0.25
 local TELEPORT_OFFSET_Y = 5
 
@@ -180,8 +179,14 @@ local function getSungLeftLegPart()
 			return p
 		end
 	end
-
 	return nil
+end
+
+-- Lazy Arena tile fetch (NO infinite yield)
+local function getPlaceTile()
+	local arena = Workspace:FindFirstChild("Arena")
+	if not arena then return nil end
+	return arena:FindFirstChild(PLACE_TILE_NAME)
 end
 
 -- ===== MAID =====
@@ -222,7 +227,7 @@ local forceLeaveToLobby = false
 
 task.spawn(function()
 	while stillCurrent() do
-		if not forceLeaveToLobby and (os.clock() - scriptStartAt) >= FORCE_LEAVE_AFTER_SECONDS then
+		if (not forceLeaveToLobby) and (os.clock() - scriptStartAt) >= FORCE_LEAVE_AFTER_SECONDS then
 			forceLeaveToLobby = true
 		end
 		task.wait(1)
@@ -273,7 +278,7 @@ local function getBladePreset()
 end
 
 -- ===== FEATURE 1: AUTO UPGRADE =====
-local autoUpgradeEnabled = false
+local autoUpgradeEnabled = true -- default ON
 local currentMoney = 0
 local nextIndex = 1
 local upgradeBusy = false
@@ -319,7 +324,7 @@ local function processUpgrades(updateUIFn)
 end
 
 -- ===== FEATURE 2: AUTO UPBOARD (PlayAgain/Leave) =====
-local autoUpboardEnabled = false
+local autoUpboardEnabled = true -- default ON
 local upboardLastAction = nil
 local upboardLastFireAt = 0
 
@@ -352,7 +357,6 @@ local function fireUpboardAction(action, updateUIFn, force)
 	upboardLastAction = action
 	upboardLastFireAt = now
 	UpboardRemote:FireServer(action)
-
 	if updateUIFn then updateUIFn(("Upboard: Sent %s"):format(action)) end
 end
 
@@ -378,10 +382,10 @@ local function handleEndGame(updateUIFn, setPlayAgainVisibleLabelFn)
 	endGameTaskId += 1
 	local myId = endGameTaskId
 
-	-- KEEP auto-upgrade as-is, but reset back to first upgrade
 	resetUpgrades(updateUIFn)
 	if updateUIFn then updateUIFn("Upgrade: Reset (EndGame)") end
 	if updateUIFn then updateUIFn() end
+	processUpgrades(updateUIFn)
 
 	task.delay(ENDGAME_DELAY, function()
 		if not stillCurrent() then return end
@@ -420,7 +424,7 @@ local function handleTurnOffBoard(updateUIFn)
 end
 
 -- ===== FEATURE 3: WAVESKIP -> PLACE -> VOTE =====
-local autoWaveSkipEnabled = false
+local autoWaveSkipEnabled = true -- default ON
 local handlingWaveSkip = false
 local waveConn = nil
 local waveHookToken = 0
@@ -431,10 +435,17 @@ local function tryGetWaveSkipGui()
 	return upboard:FindFirstChild("WaveSkip")
 end
 
-local function placeBladeMaster()
+local function placeBladeMaster(updateUIFn)
+	local tile = getPlaceTile()
+	if not tile then
+		if updateUIFn then updateUIFn("WaveSkip: Arena not loaded yet (waiting...)") end
+		return false
+	end
+
 	TilePlacementRemote:FireServer(
-		PLACE_ACTION, PLACE_SLOT, PLACE_NAME, PLACE_CFRAME, PLACE_TILE, PLACE_ZERO
+		PLACE_ACTION, PLACE_SLOT, PLACE_NAME, PLACE_CFRAME, tile, PLACE_ZERO
 	)
+	return true
 end
 
 local function handleWaveSkipVisible(updateUIFn)
@@ -454,7 +465,7 @@ local function handleWaveSkipVisible(updateUIFn)
 	if updateUIFn then updateUIFn("WaveSkip: Not found -> placing Slot_04...") end
 
 	for attempt = 1, MAX_PLACE_TRIES_THIS_WAVESKIP do
-		placeBladeMaster()
+		placeBladeMaster(updateUIFn)
 		if updateUIFn then updateUIFn(("WaveSkip: Placed %d/%d -> wait"):format(attempt, MAX_PLACE_TRIES_THIS_WAVESKIP)) end
 		task.wait(AFTER_PLACE_WAIT)
 
@@ -528,7 +539,7 @@ local function hookWaveSkip(updateUIFn, setWaveSkipVisibleLabelFn)
 	end)
 end
 
--- ====== CHALLENGE SCAN HELPERS ======
+-- ===== CHALLENGE SCAN HELPERS =====
 local function tryGetHolderForHourly(hourlyId)
 	local doors = workspace:FindFirstChild("Doors")
 	if not doors then return nil end
@@ -545,10 +556,10 @@ local function tryGetHolderForHourly(hourlyId)
 	local surfaceGui = matchDisplayPart:FindFirstChild("SurfaceGui")
 	if not surfaceGui then return nil end
 
-	local frame = surfaceGui:FindFirstChild("MatchDisplayFrame")
-	if not frame then return nil end
+	local guiFrame = surfaceGui:FindFirstChild("MatchDisplayFrame")
+	if not guiFrame then return nil end
 
-	local rewards = frame:FindFirstChild("ChallengeRewards")
+	local rewards = guiFrame:FindFirstChild("ChallengeRewards")
 	if not rewards then return nil end
 
 	return rewards:FindFirstChild("Holder")
@@ -572,7 +583,7 @@ local function findBestMatchDisplayPart()
 	return nil
 end
 
--- ====== DOORS REMOTE (Lobby Relatives -> Doors) ======
+-- ===== DOORS REMOTE (Lobby Relatives -> Doors) =====
 local function getDoorsRemote()
 	local lobby = ReplicatedStorage:FindFirstChild(LOBBY_FOLDER_NAME)
 	local r = lobby and lobby:FindFirstChild(DOORS_REMOTE_NAME) or nil
@@ -580,47 +591,41 @@ local function getDoorsRemote()
 	return nil
 end
 
-local function requestChallengeStart(statusLabel)
+local function requestChallengeStart()
 	local doors = getDoorsRemote()
-	if not doors then
-		if statusLabel then statusLabel.Text = "Status: Doors remote not found!" end
-		return false
-	end
+	if not doors then return false end
 	doors:FireServer(START_A, START_B)
 	return true
 end
 
-local function requestChallengeLeave(statusLabel)
+local function requestChallengeLeave()
 	local doors = getDoorsRemote()
-	if not doors then
-		if statusLabel then statusLabel.Text = "Status: Doors remote not found!" end
-		return false
-	end
+	if not doors then return false end
 	doors:FireServer(LEAVE_A, LEAVE_B)
 	return true
 end
 
 -- =======================
--- GUI 1: VIP MultiAuto GUI
+-- SINGLE GUI (Draggable)
 -- =======================
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "VIP_MultiAutoGui"
-screenGui.ResetOnSpawn = false
-screenGui.Parent = playerGui
-maid:Give(screenGui)
+local gui = Instance.new("ScreenGui")
+gui.Name = "VIPUnifiedGui"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+maid:Give(gui)
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 380, 0, 365)
-frame.Position = UDim2.new(0, 20, 0.5, -182)
-frame.BackgroundColor3 = Color3.fromRGB(25, 25, 28)
-frame.BorderSizePixel = 0
-frame.Parent = screenGui
-maid:Give(frame)
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 640, 0, 365)
+main.Position = UDim2.new(0, 20, 0.5, -182)
+main.BackgroundColor3 = Color3.fromRGB(25, 25, 28)
+main.BorderSizePixel = 0
+main.Parent = gui
+maid:Give(main)
 
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 12)
-corner.Parent = frame
-maid:Give(corner)
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 12)
+mainCorner.Parent = main
+maid:Give(mainCorner)
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -60, 0, 24)
@@ -631,7 +636,7 @@ title.TextColor3 = Color3.fromRGB(255, 255, 255)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 16
 title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = frame
+title.Parent = main
 maid:Give(title)
 
 local closeBtn = Instance.new("TextButton")
@@ -643,7 +648,7 @@ closeBtn.Text = "X"
 closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 closeBtn.Font = Enum.Font.GothamBold
 closeBtn.TextSize = 14
-closeBtn.Parent = frame
+closeBtn.Parent = main
 maid:Give(closeBtn)
 
 local closeCorner = Instance.new("UICorner")
@@ -651,168 +656,159 @@ closeCorner.CornerRadius = UDim.new(0, 8)
 closeCorner.Parent = closeBtn
 maid:Give(closeCorner)
 
-local upgradeStatus = Instance.new("TextLabel")
-upgradeStatus.Size = UDim2.new(1, -20, 0, 18)
-upgradeStatus.Position = UDim2.new(0, 10, 0, 38)
-upgradeStatus.BackgroundTransparency = 1
-upgradeStatus.Text = "Upgrade: OFF"
-upgradeStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
-upgradeStatus.Font = Enum.Font.Gotham
-upgradeStatus.TextSize = 13
-upgradeStatus.TextXAlignment = Enum.TextXAlignment.Left
-upgradeStatus.Parent = frame
-maid:Give(upgradeStatus)
+local function makeLabel(y, txt, size)
+	local l = Instance.new("TextLabel")
+	l.Size = UDim2.new(0, 330, 0, 18)
+	l.Position = UDim2.new(0, 10, 0, y)
+	l.BackgroundTransparency = 1
+	l.Text = txt
+	l.TextColor3 = Color3.fromRGB(200, 200, 200)
+	l.Font = Enum.Font.Gotham
+	l.TextSize = size or 13
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = main
+	maid:Give(l)
+	return l
+end
 
-local moneyLabel = Instance.new("TextLabel")
-moneyLabel.Size = UDim2.new(1, -20, 0, 18)
-moneyLabel.Position = UDim2.new(0, 10, 0, 58)
-moneyLabel.BackgroundTransparency = 1
-moneyLabel.Text = "Money: 0"
-moneyLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-moneyLabel.Font = Enum.Font.Gotham
-moneyLabel.TextSize = 13
-moneyLabel.TextXAlignment = Enum.TextXAlignment.Left
-moneyLabel.Parent = frame
-maid:Give(moneyLabel)
+local upgradeStatus = makeLabel(38, "Upgrade: ON", 13)
+local moneyLabel = makeLabel(58, "Money: 0", 13); moneyLabel.TextColor3 = Color3.fromRGB(160,160,160)
+local nextLabel = makeLabel(78, "Next: 975", 13); nextLabel.TextColor3 = Color3.fromRGB(160,160,160)
+local presetLabel = makeLabel(98, "Preset: (searching...)", 12); presetLabel.TextColor3 = Color3.fromRGB(160,160,160)
 
-local nextLabel = Instance.new("TextLabel")
-nextLabel.Size = UDim2.new(1, -20, 0, 18)
-nextLabel.Position = UDim2.new(0, 10, 0, 78)
-nextLabel.BackgroundTransparency = 1
-nextLabel.Text = "Next: 975"
-nextLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-nextLabel.Font = Enum.Font.Gotham
-nextLabel.TextSize = 13
-nextLabel.TextXAlignment = Enum.TextXAlignment.Left
-nextLabel.Parent = frame
-maid:Give(nextLabel)
+local upboardStatus = makeLabel(128, "Upboard: ON", 13)
+local playAgainVisibleLabel = makeLabel(148, "PlayAgainHolder.Visible: (waiting...)", 12); playAgainVisibleLabel.TextColor3 = Color3.fromRGB(160,160,160)
 
-local presetLabel = Instance.new("TextLabel")
-presetLabel.Size = UDim2.new(1, -20, 0, 18)
-presetLabel.Position = UDim2.new(0, 10, 0, 98)
-presetLabel.BackgroundTransparency = 1
-presetLabel.Text = "Preset: (searching...)"
-presetLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-presetLabel.Font = Enum.Font.Gotham
-presetLabel.TextSize = 12
-presetLabel.TextXAlignment = Enum.TextXAlignment.Left
-presetLabel.Parent = frame
-maid:Give(presetLabel)
+local waveSkipStatus = makeLabel(178, "WaveSkip: ON", 13)
+local waveSkipVisibleLabel = makeLabel(198, "WaveSkip.Visible: (waiting...)", 12); waveSkipVisibleLabel.TextColor3 = Color3.fromRGB(160,160,160)
 
-local upboardStatus = Instance.new("TextLabel")
-upboardStatus.Size = UDim2.new(1, -20, 0, 18)
-upboardStatus.Position = UDim2.new(0, 10, 0, 128)
-upboardStatus.BackgroundTransparency = 1
-upboardStatus.Text = "Upboard: OFF"
-upboardStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
-upboardStatus.Font = Enum.Font.Gotham
-upboardStatus.TextSize = 13
-upboardStatus.TextXAlignment = Enum.TextXAlignment.Left
-upboardStatus.Parent = frame
-maid:Give(upboardStatus)
+local memoryLabel = makeLabel(228, "Memory: ...", 12); memoryLabel.TextColor3 = Color3.fromRGB(160,160,160)
 
-local playAgainVisibleLabel = Instance.new("TextLabel")
-playAgainVisibleLabel.Size = UDim2.new(1, -20, 0, 18)
-playAgainVisibleLabel.Position = UDim2.new(0, 10, 0, 148)
-playAgainVisibleLabel.BackgroundTransparency = 1
-playAgainVisibleLabel.Text = "PlayAgainHolder.Visible: (waiting...)"
-playAgainVisibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-playAgainVisibleLabel.Font = Enum.Font.Gotham
-playAgainVisibleLabel.TextSize = 12
-playAgainVisibleLabel.TextXAlignment = Enum.TextXAlignment.Left
-playAgainVisibleLabel.Parent = frame
-maid:Give(playAgainVisibleLabel)
+local challengeTitle = Instance.new("TextLabel")
+challengeTitle.Size = UDim2.new(0, 280, 0, 22)
+challengeTitle.Position = UDim2.new(0, 350, 0, 34)
+challengeTitle.BackgroundTransparency = 1
+challengeTitle.Text = "VIP Challenge"
+challengeTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+challengeTitle.Font = Enum.Font.GothamBold
+challengeTitle.TextSize = 16
+challengeTitle.TextXAlignment = Enum.TextXAlignment.Left
+challengeTitle.Parent = main
+maid:Give(challengeTitle)
 
-local waveSkipStatus = Instance.new("TextLabel")
-waveSkipStatus.Size = UDim2.new(1, -20, 0, 18)
-waveSkipStatus.Position = UDim2.new(0, 10, 0, 178)
-waveSkipStatus.BackgroundTransparency = 1
-waveSkipStatus.Text = "WaveSkip: OFF"
-waveSkipStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
-waveSkipStatus.Font = Enum.Font.Gotham
-waveSkipStatus.TextSize = 13
-waveSkipStatus.TextXAlignment = Enum.TextXAlignment.Left
-waveSkipStatus.Parent = frame
-maid:Give(waveSkipStatus)
+local panelStatus = Instance.new("TextLabel")
+panelStatus.Size = UDim2.new(0, 280, 0, 18)
+panelStatus.Position = UDim2.new(0, 350, 0, 58)
+panelStatus.BackgroundTransparency = 1
+panelStatus.Text = "Status: Booting..."
+panelStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+panelStatus.Font = Enum.Font.Gotham
+panelStatus.TextSize = 13
+panelStatus.TextXAlignment = Enum.TextXAlignment.Left
+panelStatus.Parent = main
+maid:Give(panelStatus)
 
-local waveSkipVisibleLabel = Instance.new("TextLabel")
-waveSkipVisibleLabel.Size = UDim2.new(1, -20, 0, 18)
-waveSkipVisibleLabel.Position = UDim2.new(0, 10, 0, 198)
-waveSkipVisibleLabel.BackgroundTransparency = 1
-waveSkipVisibleLabel.Text = "WaveSkip.Visible: (waiting...)"
-waveSkipVisibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-waveSkipVisibleLabel.Font = Enum.Font.Gotham
-waveSkipVisibleLabel.TextSize = 12
-waveSkipVisibleLabel.TextXAlignment = Enum.TextXAlignment.Left
-waveSkipVisibleLabel.Parent = frame
-maid:Give(waveSkipVisibleLabel)
+local function makeBtn(x, y, w, h, text, bg, tc)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0, w, 0, h)
+	b.Position = UDim2.new(0, x, 0, y)
+	b.BackgroundColor3 = bg
+	b.BorderSizePixel = 0
+	b.Text = text
+	b.TextColor3 = tc
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 16
+	b.Parent = main
+	maid:Give(b)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 10)
+	c.Parent = b
+	maid:Give(c)
+	return b
+end
 
-local memoryLabel = Instance.new("TextLabel")
-memoryLabel.Size = UDim2.new(1, -20, 0, 18)
-memoryLabel.Position = UDim2.new(0, 10, 0, 228)
-memoryLabel.BackgroundTransparency = 1
-memoryLabel.Text = "Memory: ..."
-memoryLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
-memoryLabel.Font = Enum.Font.Gotham
-memoryLabel.TextSize = 12
-memoryLabel.TextXAlignment = Enum.TextXAlignment.Left
-memoryLabel.Parent = frame
-maid:Give(memoryLabel)
+local tpNpcBtn = makeBtn(350, 82, 280, 44, "TP to Sung6S Left Leg", Color3.fromRGB(50,150,250), Color3.fromRGB(255,255,255))
+local challengeBtn = makeBtn(350, 134, 280, 44, "Challenge Check: ON", Color3.fromRGB(70,140,70), Color3.fromRGB(255,255,255))
+local startBtn = makeBtn(350, 188, 280, 40, "START", Color3.fromRGB(240,170,60), Color3.fromRGB(0,0,0))
+local leaveBtn = makeBtn(350, 234, 280, 40, "LEAVE", Color3.fromRGB(220,70,70), Color3.fromRGB(255,255,255))
+local autoStartBtn = makeBtn(350, 280, 280, 40, "Auto-Start: ON", Color3.fromRGB(70,140,70), Color3.fromRGB(255,255,255))
 
-local upgradeToggle = Instance.new("TextButton")
-upgradeToggle.Size = UDim2.new(0.33, -14, 0, 34)
-upgradeToggle.Position = UDim2.new(0, 10, 1, -44)
-upgradeToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
-upgradeToggle.BorderSizePixel = 0
-upgradeToggle.Text = "Upgrade: OFF"
-upgradeToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-upgradeToggle.Font = Enum.Font.GothamBold
-upgradeToggle.TextSize = 14
-upgradeToggle.Parent = frame
-maid:Give(upgradeToggle)
+local function makeSmallToggle(x, text)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(0, 200, 0, 34)
+	b.Position = UDim2.new(0, x, 1, -44)
+	b.BackgroundColor3 = Color3.fromRGB(0, 170, 85)
+	b.BorderSizePixel = 0
+	b.Text = text
+	b.TextColor3 = Color3.fromRGB(255, 255, 255)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.Parent = main
+	maid:Give(b)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, 10)
+	c.Parent = b
+	maid:Give(c)
+	return b
+end
 
-local upboardToggle = Instance.new("TextButton")
-upboardToggle.Size = UDim2.new(0.33, -14, 0, 34)
-upboardToggle.Position = UDim2.new(0.33, 7, 1, -44)
-upboardToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
-upboardToggle.BorderSizePixel = 0
-upboardToggle.Text = "Upboard: OFF"
-upboardToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-upboardToggle.Font = Enum.Font.GothamBold
-upboardToggle.TextSize = 14
-upboardToggle.Parent = frame
-maid:Give(upboardToggle)
-
-local waveSkipToggle = Instance.new("TextButton")
-waveSkipToggle.Size = UDim2.new(0.34, -14, 0, 34)
-waveSkipToggle.Position = UDim2.new(0.66, 7, 1, -44)
-waveSkipToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
-waveSkipToggle.BorderSizePixel = 0
-waveSkipToggle.Text = "WaveSkip: OFF"
-waveSkipToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
-waveSkipToggle.Font = Enum.Font.GothamBold
-waveSkipToggle.TextSize = 14
-waveSkipToggle.Parent = frame
-maid:Give(waveSkipToggle)
-
-local c1 = Instance.new("UICorner"); c1.CornerRadius = UDim.new(0, 10); c1.Parent = upgradeToggle; maid:Give(c1)
-local c2 = Instance.new("UICorner"); c2.CornerRadius = UDim.new(0, 10); c2.Parent = upboardToggle; maid:Give(c2)
-local c3 = Instance.new("UICorner"); c3.CornerRadius = UDim.new(0, 10); c3.Parent = waveSkipToggle; maid:Give(c3)
+local upgradeToggle = makeSmallToggle(10, "Upgrade: ON")
+local upboardToggle = makeSmallToggle(220, "Upboard: ON")
+local waveSkipToggle = makeSmallToggle(430, "WaveSkip: ON")
 
 local rejoinToggle = Instance.new("TextButton")
-rejoinToggle.Size = UDim2.new(1, -20, 0, 30)
+rejoinToggle.Size = UDim2.new(0, 330, 0, 30)
 rejoinToggle.Position = UDim2.new(0, 10, 0, 252)
 rejoinToggle.BackgroundColor3 = Color3.fromRGB(0, 170, 85)
 rejoinToggle.BorderSizePixel = 0
 rejoinToggle.Text = "Auto-Rejoin: ON"
-rejoinToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+rejoinToggle.TextColor3 = Color3.fromRGB(255,255,255)
 rejoinToggle.Font = Enum.Font.GothamBold
 rejoinToggle.TextSize = 13
-rejoinToggle.Parent = frame
+rejoinToggle.Parent = main
 maid:Give(rejoinToggle)
-
 local rC = Instance.new("UICorner"); rC.CornerRadius = UDim.new(0, 10); rC.Parent = rejoinToggle; maid:Give(rC)
 
+-- ===== DRAGGING =====
+do
+	local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
+	local function updateDrag(input)
+		local delta = input.Position - dragStart
+		main.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + delta.X,
+			startPos.Y.Scale, startPos.Y.Offset + delta.Y
+		)
+	end
+
+	maid:Give(main.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = main.Position
+			local conn
+			conn = input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					if conn then conn:Disconnect() end
+				end
+			end)
+		end
+	end))
+
+	maid:Give(main.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end))
+
+	maid:Give(UserInputService.InputChanged:Connect(function(input)
+		if dragging and input == dragInput then
+			updateDrag(input)
+		end
+	end))
+end
+
+-- ===== UI functions =====
 local function setPlayAgainVisibleLabel(v)
 	if v == nil then
 		setTextIfChanged(playAgainVisibleLabel, "PlayAgainHolder.Visible: (waiting...)")
@@ -829,6 +825,23 @@ local function setWaveSkipVisibleLabel(v)
 	end
 end
 
+local function updateTogglesUI()
+	upgradeToggle.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+	upgradeToggle.BackgroundColor3 = autoUpgradeEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+	upgradeStatus.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+
+	upboardToggle.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
+	upboardToggle.BackgroundColor3 = autoUpboardEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+	upboardStatus.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
+
+	waveSkipToggle.Text = autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF"
+	waveSkipToggle.BackgroundColor3 = autoWaveSkipEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+	waveSkipStatus.Text = autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF"
+
+	rejoinToggle.Text = autoRejoinEnabled and "Auto-Rejoin: ON" or "Auto-Rejoin: OFF"
+	rejoinToggle.BackgroundColor3 = autoRejoinEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+end
+
 local function updateUI(statusText)
 	setTextIfChanged(moneyLabel, ("Money: %d"):format(math.floor(currentMoney + 0.5)))
 	local nextTarget = thresholds[nextIndex]
@@ -837,17 +850,7 @@ local function updateUI(statusText)
 	local preset = getBladePreset()
 	setTextIfChanged(presetLabel, ("Preset: %s"):format(preset and preset.Name or "(not found)"))
 
-	upgradeToggle.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
-	upgradeToggle.BackgroundColor3 = autoUpgradeEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
-
-	upboardToggle.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
-	upboardToggle.BackgroundColor3 = autoUpboardEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
-
-	waveSkipToggle.Text = autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF"
-	waveSkipToggle.BackgroundColor3 = autoWaveSkipEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
-
-	rejoinToggle.Text = autoRejoinEnabled and "Auto-Rejoin: ON" or "Auto-Rejoin: OFF"
-	rejoinToggle.BackgroundColor3 = autoRejoinEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+	updateTogglesUI()
 
 	if statusText then
 		if statusText:sub(1, 7) == "Upgrade" then
@@ -857,181 +860,16 @@ local function updateUI(statusText)
 		elseif statusText:sub(1, 7) == "WaveSkip" then
 			setTextIfChanged(waveSkipStatus, statusText)
 		end
-	else
-		setTextIfChanged(upgradeStatus, autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF")
-		setTextIfChanged(upboardStatus, autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF")
-		setTextIfChanged(waveSkipStatus, autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF")
 	end
 end
 
--- =======================
--- GUI 2: Challenge TP Panel (Draggable)
--- =======================
-local panelGui = Instance.new("ScreenGui")
-panelGui.Name = "VIPPanelGui"
-panelGui.ResetOnSpawn = false
-panelGui.Parent = playerGui
-maid:Give(panelGui)
-
-local panelFrame = Instance.new("Frame")
-panelFrame.Name = "MainFrame"
-panelFrame.Size = UDim2.new(0, 280, 0, 305)
-panelFrame.Position = UDim2.new(0.15, 0, 0.35, 0)
-panelFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-panelFrame.BorderSizePixel = 0
-panelFrame.Parent = panelGui
-maid:Give(panelFrame)
-
-local panelCorner = Instance.new("UICorner")
-panelCorner.CornerRadius = UDim.new(0, 10)
-panelCorner.Parent = panelFrame
-maid:Give(panelCorner)
-
-local panelTitle = Instance.new("TextLabel")
-panelTitle.Size = UDim2.new(1, -20, 0, 28)
-panelTitle.Position = UDim2.new(0, 10, 0, 6)
-panelTitle.BackgroundTransparency = 1
-panelTitle.Text = "VIP Panel"
-panelTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-panelTitle.TextScaled = true
-panelTitle.Font = Enum.Font.GothamBold
-panelTitle.Parent = panelFrame
-maid:Give(panelTitle)
-
-local panelStatus = Instance.new("TextLabel")
-panelStatus.Size = UDim2.new(1, -20, 0, 20)
-panelStatus.Position = UDim2.new(0, 10, 0, 34)
-panelStatus.BackgroundTransparency = 1
-panelStatus.Text = "Status: Ready"
-panelStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
-panelStatus.TextScaled = true
-panelStatus.Font = Enum.Font.Gotham
-panelStatus.Parent = panelFrame
-maid:Give(panelStatus)
-
-local tpNpcBtn = Instance.new("TextButton")
-tpNpcBtn.Size = UDim2.new(1, -20, 0, 44)
-tpNpcBtn.Position = UDim2.new(0, 10, 0, 60)
-tpNpcBtn.BackgroundColor3 = Color3.fromRGB(50, 150, 250)
-tpNpcBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-tpNpcBtn.TextScaled = true
-tpNpcBtn.Font = Enum.Font.GothamBold
-tpNpcBtn.Text = "TP to Sung6S Left Leg"
-tpNpcBtn.Parent = panelFrame
-maid:Give(tpNpcBtn)
-
-local tpCorner = Instance.new("UICorner")
-tpCorner.CornerRadius = UDim.new(0, 8)
-tpCorner.Parent = tpNpcBtn
-maid:Give(tpCorner)
-
-local challengeBtn = Instance.new("TextButton")
-challengeBtn.Size = UDim2.new(1, -20, 0, 44)
-challengeBtn.Position = UDim2.new(0, 10, 0, 112)
-challengeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-challengeBtn.TextScaled = true
-challengeBtn.Font = Enum.Font.GothamBold
-challengeBtn.Parent = panelFrame
-maid:Give(challengeBtn)
-
-local challengeCorner = Instance.new("UICorner")
-challengeCorner.CornerRadius = UDim.new(0, 8)
-challengeCorner.Parent = challengeBtn
-maid:Give(challengeCorner)
-
-local startBtn = Instance.new("TextButton")
-startBtn.Size = UDim2.new(1, -20, 0, 40)
-startBtn.Position = UDim2.new(0, 10, 0, 166)
-startBtn.BackgroundColor3 = Color3.fromRGB(240, 170, 60)
-startBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
-startBtn.TextScaled = true
-startBtn.Font = Enum.Font.GothamBold
-startBtn.Text = "START"
-startBtn.Parent = panelFrame
-maid:Give(startBtn)
-
-local startCorner = Instance.new("UICorner")
-startCorner.CornerRadius = UDim.new(0, 8)
-startCorner.Parent = startBtn
-maid:Give(startCorner)
-
-local leaveBtn = Instance.new("TextButton")
-leaveBtn.Size = UDim2.new(1, -20, 0, 40)
-leaveBtn.Position = UDim2.new(0, 10, 0, 212)
-leaveBtn.BackgroundColor3 = Color3.fromRGB(220, 70, 70)
-leaveBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-leaveBtn.TextScaled = true
-leaveBtn.Font = Enum.Font.GothamBold
-leaveBtn.Text = "LEAVE"
-leaveBtn.Parent = panelFrame
-maid:Give(leaveBtn)
-
-local leaveCorner = Instance.new("UICorner")
-leaveCorner.CornerRadius = UDim.new(0, 8)
-leaveCorner.Parent = leaveBtn
-maid:Give(leaveCorner)
-
-local autoStartBtn = Instance.new("TextButton")
-autoStartBtn.Size = UDim2.new(1, -20, 0, 40)
-autoStartBtn.Position = UDim2.new(0, 10, 0, 258)
-autoStartBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
-autoStartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-autoStartBtn.TextScaled = true
-autoStartBtn.Font = Enum.Font.GothamBold
-autoStartBtn.Text = "Auto-Start: OFF"
-autoStartBtn.Parent = panelFrame
-maid:Give(autoStartBtn)
-
-local autoStartCorner = Instance.new("UICorner")
-autoStartCorner.CornerRadius = UDim.new(0, 8)
-autoStartCorner.Parent = autoStartBtn
-maid:Give(autoStartCorner)
-
--- ===== DRAGGING (Panel) =====
-do
-	local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
-	local function updateDrag(input)
-		local delta = input.Position - dragStart
-		panelFrame.Position = UDim2.new(
-			startPos.X.Scale, startPos.X.Offset + delta.X,
-			startPos.Y.Scale, startPos.Y.Offset + delta.Y
-		)
-	end
-
-	maid:Give(panelFrame.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			dragStart = input.Position
-			startPos = panelFrame.Position
-			local conn
-			conn = input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-					if conn then conn:Disconnect() end
-				end
-			end)
-		end
-	end))
-
-	maid:Give(panelFrame.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-			dragInput = input
-		end
-	end))
-
-	maid:Give(UserInputService.InputChanged:Connect(function(input)
-		if dragging and input == dragInput then
-			updateDrag(input)
-		end
-	end))
-end
-
--- ===== Challenge Panel State =====
-local challengeEnabled = false
-local autoStartEnabled = false
+-- ===== Challenge state (START ON) =====
+local challengeEnabled = true -- <- changed
+local autoStartEnabled = true
 local lastTargetPart = nil
 local lastTeleportTime = 0
 local lastStartPressTime = 0
+local tpToSungOnEnableDone = false
 
 local function updateChallengeText()
 	if challengeEnabled then
@@ -1055,6 +893,7 @@ end
 
 updateChallengeText()
 updateAutoStartText()
+updateUI()
 
 -- ===== AUTO-REJOIN LOOP =====
 local lastOverAt = 0
@@ -1095,10 +934,8 @@ task.spawn(function()
 	end
 end)
 
--- ===== BUTTON EVENTS (MultiAuto) =====
-maid:Give(closeBtn.MouseButton1Click:Connect(function()
-	stopAll()
-end))
+-- ===== BUTTON EVENTS =====
+maid:Give(closeBtn.MouseButton1Click:Connect(function() stopAll() end))
 
 maid:Give(rejoinToggle.MouseButton1Click:Connect(function()
 	if not stillCurrent() then return end
@@ -1145,16 +982,6 @@ maid:Give(waveSkipToggle.MouseButton1Click:Connect(function()
 	end
 end))
 
-maid:Give(UpboardRemote.OnClientEvent:Connect(function(action, ...)
-	if not stillCurrent() then return end
-	if action == "EndGame" then
-		handleEndGame(updateUI, setPlayAgainVisibleLabel)
-	elseif action == "TurnOffBoard" then
-		handleTurnOffBoard(updateUI)
-	end
-end))
-
--- ===== BUTTON EVENTS (Challenge Panel) =====
 maid:Give(tpNpcBtn.MouseButton1Click:Connect(function()
 	panelStatus.Text = "Status: Looking for Sung6S..."
 	local leftLeg = getSungLeftLegPart()
@@ -1169,9 +996,15 @@ end))
 maid:Give(challengeBtn.MouseButton1Click:Connect(function()
 	challengeEnabled = not challengeEnabled
 	updateChallengeText()
-	panelStatus.Text = challengeEnabled and "Status: Challenge check enabled" or "Status: Ready"
-	lastTeleportTime = 0
-	lastStartPressTime = 0
+
+	if challengeEnabled then
+		panelStatus.Text = "Status: Challenge enabled (TP Sung -> scan)"
+		tpToSungOnEnableDone = false
+		lastTeleportTime = 0
+		lastStartPressTime = 0
+	else
+		panelStatus.Text = "Status: Ready"
+	end
 end))
 
 maid:Give(autoStartBtn.MouseButton1Click:Connect(function()
@@ -1182,28 +1015,55 @@ maid:Give(autoStartBtn.MouseButton1Click:Connect(function()
 end))
 
 maid:Give(startBtn.MouseButton1Click:Connect(function()
-	if requestChallengeStart(panelStatus) then
+	if requestChallengeStart() then
 		panelStatus.Text = "Status: Start requested (manual)"
+	else
+		panelStatus.Text = "Status: Doors remote not found!"
 	end
 end))
 
 maid:Give(leaveBtn.MouseButton1Click:Connect(function()
-	if requestChallengeLeave(panelStatus) then
+	if requestChallengeLeave() then
 		panelStatus.Text = "Status: Leave requested"
+	else
+		panelStatus.Text = "Status: Doors remote not found!"
+	end
+end))
+
+maid:Give(UpboardRemote.OnClientEvent:Connect(function(action, ...)
+	if not stillCurrent() then return end
+	if action == "EndGame" then
+		handleEndGame(updateUI, setPlayAgainVisibleLabel)
+	elseif action == "TurnOffBoard" then
+		handleTurnOffBoard(updateUI)
 	end
 end))
 
 -- ===== START LOOPS =====
 startUpboardLoop(updateUI, setPlayAgainVisibleLabel)
 hookWaveSkip(updateUI, setWaveSkipVisibleLabel)
-updateUI()
 
+updateUI()
+processUpgrades(updateUI)
+
+-- Challenge loop (already ON)
 task.spawn(function()
 	while stillCurrent() do
 		task.wait(CHECK_INTERVAL)
-
 		if not challengeEnabled then
 			continue
+		end
+
+		if not tpToSungOnEnableDone then
+			local leftLeg = getSungLeftLegPart()
+			if leftLeg then
+				panelStatus.Text = "Status: TP Sung6S -> now scanning..."
+				teleportToPart(leftLeg)
+				tpToSungOnEnableDone = true
+			else
+				panelStatus.Text = "Status: Waiting for Sung6S..."
+				continue
+			end
 		end
 
 		local targetPart, foundName = findBestMatchDisplayPart()
@@ -1229,8 +1089,10 @@ task.spawn(function()
 		if autoStartEnabled and dist <= PRESS_START_DISTANCE then
 			if (now - lastStartPressTime) >= START_PRESS_COOLDOWN then
 				lastStartPressTime = now
-				if requestChallengeStart(panelStatus) then
+				if requestChallengeStart() then
 					panelStatus.Text = ("Status: Auto-Start (%s @ %.0f studs)"):format(foundName, dist)
+				else
+					panelStatus.Text = "Status: Doors remote not found!"
 				end
 			end
 		else
@@ -1238,3 +1100,6 @@ task.spawn(function()
 		end
 	end
 end)
+
+-- initial status
+panelStatus.Text = "Status: Challenge ON (TP Sung -> scan)"
