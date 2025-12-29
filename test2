@@ -1,0 +1,768 @@
+-- VIP Multi Auto (Singleton + Anti-Crash Auto-Rejoin)
+-- Put this LocalScript in StarterPlayerScripts
+
+-- ===== SINGLETON GUARD =====
+do
+	_G.__VIP_MULTI_AUTO_RUNNING = _G.__VIP_MULTI_AUTO_RUNNING or { running = false, token = 0 }
+	if _G.__VIP_MULTI_AUTO_RUNNING.running then
+		warn("[VIP] Already running, blocked duplicate.")
+		return
+	end
+	_G.__VIP_MULTI_AUTO_RUNNING.running = true
+	_G.__VIP_MULTI_AUTO_RUNNING.token += 1
+end
+
+local RUN_TOKEN = _G.__VIP_MULTI_AUTO_RUNNING.token
+local function stillCurrent()
+	return _G.__VIP_MULTI_AUTO_RUNNING
+		and _G.__VIP_MULTI_AUTO_RUNNING.running == true
+		and _G.__VIP_MULTI_AUTO_RUNNING.token == RUN_TOKEN
+end
+
+-- ===== SERVICES =====
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local TeleportService = game:GetService("TeleportService")
+local Stats = game:GetService("Stats")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- remove old gui from previous runs
+pcall(function()
+	local old = playerGui:FindFirstChild("VIP_MultiAutoGui")
+	if old then old:Destroy() end
+end)
+
+-- ===== REMOTES =====
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local MoneyRemote = Remotes:WaitForChild("Money")
+local ChampionRemote = Remotes:WaitForChild("Champion")
+local UpboardRemote = Remotes:WaitForChild("Upboard")
+local TilePlacementRemote = Remotes:WaitForChild("TilePlacement")
+
+-- ===== CONFIG =====
+local thresholds = {975, 1150, 1725, 2010, 2530, 2750}
+
+local PRESET_ATTRIBUTE_KEY = "Champion"
+local PRESET_ATTRIBUTE_VALUE = "Blade Master"
+
+local UPBOARD_COOLDOWN = 0.75
+local UPBOARD_LOOP_INTERVAL = 0.9
+local ENDGAME_DELAY = 10 -- <-- waits 10 seconds before PlayAgain/Leave
+
+-- WaveSkip -> Place -> Vote
+local PLACE_ACTION = "Place"
+local PLACE_SLOT = "Slot_04"
+local PLACE_NAME = "Blade Master"
+local PLACE_CFRAME = CFrame.new(
+	3838.8388671875, 256.97607421875, -3677.232177734375,
+	0, 0, 1,
+	0, 1, 0,
+	-1, 0, 0
+)
+local PLACE_TILE = Workspace:WaitForChild("Arena"):WaitForChild("PlacementTile_1_3")
+local PLACE_ZERO = 0
+local AFTER_PLACE_WAIT = 0.35
+local MAX_PLACE_TRIES_THIS_WAVESKIP = 3
+
+-- Auto-Rejoin (Anti-crash)
+local autoRejoinEnabled = true
+local REJOIN_AT_MB = 4800
+local REJOIN_CONFIRM_SECONDS = 8
+local REJOIN_COOLDOWN_SECONDS = 120
+
+-- ===== HELPERS =====
+local function norm(v)
+	return tostring(v or ""):lower():gsub("%s+", "")
+end
+local wantValNorm = norm(PRESET_ATTRIBUTE_VALUE)
+
+local function safeFindChild(root, name)
+	if not root then return nil end
+	return root:FindFirstChild(name)
+end
+
+local function setTextIfChanged(label, txt)
+	if label and label.Text ~= txt then
+		label.Text = txt
+	end
+end
+
+local function getClientMemoryMB()
+	return Stats:GetTotalMemoryUsageMb()
+end
+
+-- ===== MAID =====
+local Maid = {}
+Maid.__index = Maid
+function Maid.new()
+	return setmetatable({ tasks = {} }, Maid)
+end
+function Maid:Give(t)
+	table.insert(self.tasks, t)
+	return t
+end
+function Maid:DoCleaning()
+	for i = #self.tasks, 1, -1 do
+		local t = self.tasks[i]
+		self.tasks[i] = nil
+		if typeof(t) == "RBXScriptConnection" then
+			pcall(function() t:Disconnect() end)
+		elseif typeof(t) == "Instance" then
+			pcall(function() t:Destroy() end)
+		elseif type(t) == "function" then
+			pcall(t)
+		end
+	end
+end
+
+local maid = Maid.new()
+
+local function stopAll()
+	if not stillCurrent() then return end
+	_G.__VIP_MULTI_AUTO_RUNNING.running = false
+	maid:DoCleaning()
+end
+
+-- ===== PRESET CACHE (Blade Master) =====
+local presetsFolder = Workspace:WaitForChild("Presets")
+local cachedBladePreset = nil
+
+local function isBladeMasterPreset(preset)
+	local attr = preset:GetAttribute(PRESET_ATTRIBUTE_KEY)
+	return attr ~= nil and norm(attr) == wantValNorm
+end
+
+local function rebuildBladeCache()
+	cachedBladePreset = nil
+	for _, child in ipairs(presetsFolder:GetChildren()) do
+		if isBladeMasterPreset(child) then
+			cachedBladePreset = child
+			return
+		end
+	end
+end
+
+rebuildBladeCache()
+
+maid:Give(presetsFolder.ChildAdded:Connect(function(child)
+	if not stillCurrent() then return end
+	if not cachedBladePreset and isBladeMasterPreset(child) then
+		cachedBladePreset = child
+	end
+end))
+
+maid:Give(presetsFolder.ChildRemoved:Connect(function(child)
+	if not stillCurrent() then return end
+	if child == cachedBladePreset then
+		rebuildBladeCache()
+	end
+end))
+
+local function getBladePreset()
+	if cachedBladePreset and cachedBladePreset.Parent == presetsFolder then
+		return cachedBladePreset
+	end
+	rebuildBladeCache()
+	return cachedBladePreset
+end
+
+-- ===== FEATURE 1: AUTO UPGRADE =====
+local autoUpgradeEnabled = false
+local currentMoney = 0
+local nextIndex = 1
+local upgradeBusy = false
+
+local function resetUpgrades(statusFn)
+	nextIndex = 1
+	upgradeBusy = false
+	if statusFn then statusFn("Upgrade: Reset") end
+end
+
+local function fireUpgradePreset()
+	local preset = getBladePreset()
+	if not preset then
+		return false, "Upgrade: Preset not found"
+	end
+	ChampionRemote:FireServer("Upgrade", preset)
+	return true, "Upgrade: Sent Upgrade"
+end
+
+local function processUpgrades(updateUIFn)
+	if not autoUpgradeEnabled then return end
+	if upgradeBusy then return end
+	if nextIndex > #thresholds then return end
+
+	upgradeBusy = true
+	while autoUpgradeEnabled
+		and nextIndex <= #thresholds
+		and (currentMoney + 1e-6) >= thresholds[nextIndex]
+	do
+		local target = thresholds[nextIndex]
+		if updateUIFn then updateUIFn(("Upgrade: Upgrading @ %d..."):format(target)) end
+
+		local ok, msg = fireUpgradePreset()
+		if not ok then
+			if updateUIFn then updateUIFn(msg) end
+			break
+		end
+
+		nextIndex += 1
+		task.wait(0.25)
+	end
+	upgradeBusy = false
+end
+
+-- ===== FEATURE 2: AUTO UPBOARD (PlayAgain/Leave) =====
+local autoUpboardEnabled = false
+local upboardLastAction = nil
+local upboardLastFireAt = 0
+
+local function tryGetPlayAgainHolder()
+	local upboard = playerGui:FindFirstChild("Upboard")
+	if not upboard then return nil end
+	local result = safeFindChild(upboard, "Result")
+	local main = safeFindChild(result, "Main")
+	local options = safeFindChild(main, "Options")
+	return safeFindChild(options, "PlayAgainButtonHolder")
+end
+
+local function desiredUpboardAction(holder)
+	if not holder then return nil end
+	return holder.Visible and "PlayAgain" or "Leave"
+end
+
+local function fireUpboardAction(action, updateUIFn, force)
+	if not action then return end
+
+	local now = os.clock()
+	if not force then
+		if now - upboardLastFireAt < UPBOARD_COOLDOWN then return end
+		if action == upboardLastAction then return end
+	end
+
+	upboardLastAction = action
+	upboardLastFireAt = now
+	UpboardRemote:FireServer(action)
+
+	if updateUIFn then updateUIFn(("Upboard: Sent %s"):format(action)) end
+end
+
+local function startUpboardLoop(updateUIFn, setPlayAgainVisibleLabelFn)
+	task.spawn(function()
+		while stillCurrent() do
+			if autoUpboardEnabled then
+				local holder = tryGetPlayAgainHolder()
+				if setPlayAgainVisibleLabelFn then
+					setPlayAgainVisibleLabelFn(holder and holder.Visible or nil)
+				end
+				local action = desiredUpboardAction(holder)
+				fireUpboardAction(action, updateUIFn, false)
+			end
+			task.wait(UPBOARD_LOOP_INTERVAL)
+		end
+	end)
+end
+
+-- ===== EndGame handling =====
+local endGameTaskId = 0
+local function handleEndGame(updateUIFn, setPlayAgainVisibleLabelFn)
+	endGameTaskId += 1
+	local myId = endGameTaskId
+
+	-- Reset auto-upgrade fully (turn OFF + reset progress)
+	autoUpgradeEnabled = false
+	resetUpgrades(updateUIFn)
+	if updateUIFn then updateUIFn("Upgrade: Reset (EndGame)") end
+	if updateUIFn then updateUIFn() end
+
+	task.delay(ENDGAME_DELAY, function()
+		if not stillCurrent() then return end
+		if myId ~= endGameTaskId then return end
+
+		local holder = tryGetPlayAgainHolder()
+		if setPlayAgainVisibleLabelFn then
+			setPlayAgainVisibleLabelFn(holder and holder.Visible or nil)
+		end
+
+		local tries = 0
+		while stillCurrent() and (not holder) and tries < 20 do
+			task.wait(0.25)
+			holder = tryGetPlayAgainHolder()
+			tries += 1
+			if setPlayAgainVisibleLabelFn then
+				setPlayAgainVisibleLabelFn(holder and holder.Visible or nil)
+			end
+		end
+
+		local action = (holder and holder.Visible) and "PlayAgain" or "Leave"
+
+		-- Reset spam guards so it always fires once here
+		upboardLastAction = nil
+		upboardLastFireAt = 0
+		fireUpboardAction(action, updateUIFn, true)
+	end)
+end
+
+local function handleTurnOffBoard(updateUIFn)
+	resetUpgrades(updateUIFn)
+end
+
+-- ===== FEATURE 3: WAVESKIP -> PLACE -> VOTE =====
+local autoWaveSkipEnabled = false
+local handlingWaveSkip = false
+local waveConn = nil
+local waveHookToken = 0
+
+local function tryGetWaveSkipGui()
+	local upboard = playerGui:FindFirstChild("Upboard")
+	if not upboard then return nil end
+	return upboard:FindFirstChild("WaveSkip")
+end
+
+local function placeBladeMaster()
+	TilePlacementRemote:FireServer(
+		"Place", "Slot_04", "Blade Master", PLACE_CFRAME, PLACE_TILE, 0
+	)
+end
+
+local function handleWaveSkipVisible(updateUIFn)
+	if handlingWaveSkip then return end
+	handlingWaveSkip = true
+
+	if updateUIFn then updateUIFn("WaveSkip: Visible -> checking Blade Master...") end
+
+	local preset = getBladePreset()
+	if preset then
+		if updateUIFn then updateUIFn(("WaveSkip: Found (%s) -> Vote"):format(preset.Name)) end
+		UpboardRemote:FireServer("Vote")
+		handlingWaveSkip = false
+		return
+	end
+
+	if updateUIFn then updateUIFn("WaveSkip: Not found -> placing Slot_04...") end
+
+	for attempt = 1, MAX_PLACE_TRIES_THIS_WAVESKIP do
+		placeBladeMaster()
+		if updateUIFn then updateUIFn(("WaveSkip: Placed %d/%d -> wait"):format(attempt, MAX_PLACE_TRIES_THIS_WAVESKIP)) end
+		task.wait(AFTER_PLACE_WAIT)
+
+		preset = getBladePreset()
+		if preset then
+			if updateUIFn then updateUIFn(("WaveSkip: Now found (%s) -> Vote"):format(preset.Name)) end
+			UpboardRemote:FireServer("Vote")
+			handlingWaveSkip = false
+			return
+		end
+	end
+
+	if updateUIFn then updateUIFn("WaveSkip: Still not found -> Vote anyway") end
+	UpboardRemote:FireServer("Vote")
+	handlingWaveSkip = false
+end
+
+local function unhookWaveSkip()
+	if waveConn then
+		waveConn:Disconnect()
+		waveConn = nil
+	end
+end
+
+local function hookWaveSkip(updateUIFn, setWaveSkipVisibleLabelFn)
+	waveHookToken += 1
+	local myToken = waveHookToken
+
+	task.spawn(function()
+		while stillCurrent() and myToken == waveHookToken do
+			local waveSkip = tryGetWaveSkipGui()
+			if waveSkip then
+				unhookWaveSkip()
+
+				if setWaveSkipVisibleLabelFn then
+					setWaveSkipVisibleLabelFn(waveSkip.Visible)
+				end
+
+				local last = waveSkip.Visible
+
+				waveConn = waveSkip:GetPropertyChangedSignal("Visible"):Connect(function()
+					if not stillCurrent() then return end
+					if myToken ~= waveHookToken then return end
+
+					if setWaveSkipVisibleLabelFn then
+						setWaveSkipVisibleLabelFn(waveSkip.Visible)
+					end
+
+					if autoWaveSkipEnabled and (not last) and waveSkip.Visible then
+						handleWaveSkipVisible(updateUIFn)
+					end
+					last = waveSkip.Visible
+				end)
+
+				maid:Give(waveConn)
+
+				if autoWaveSkipEnabled and waveSkip.Visible then
+					handleWaveSkipVisible(updateUIFn)
+				end
+
+				while stillCurrent() and myToken == waveHookToken and waveSkip.Parent do
+					task.wait(0.6)
+				end
+			else
+				if setWaveSkipVisibleLabelFn then
+					setWaveSkipVisibleLabelFn(nil)
+				end
+				task.wait(0.6)
+			end
+		end
+	end)
+end
+
+-- ===== GUI =====
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "VIP_MultiAutoGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+maid:Give(screenGui)
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 380, 0, 365)
+frame.Position = UDim2.new(0, 20, 0.5, -182)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 28)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -60, 0, 24)
+title.Position = UDim2.new(0, 10, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = "VIP Auto Panel"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 28, 0, 24)
+closeBtn.Position = UDim2.new(1, -38, 0, 8)
+closeBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 65)
+closeBtn.BorderSizePixel = 0
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = frame
+local closeCorner = Instance.new("UICorner")
+closeCorner.CornerRadius = UDim.new(0, 8)
+closeCorner.Parent = closeBtn
+
+local upgradeStatus = Instance.new("TextLabel")
+upgradeStatus.Size = UDim2.new(1, -20, 0, 18)
+upgradeStatus.Position = UDim2.new(0, 10, 0, 38)
+upgradeStatus.BackgroundTransparency = 1
+upgradeStatus.Text = "Upgrade: OFF"
+upgradeStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+upgradeStatus.Font = Enum.Font.Gotham
+upgradeStatus.TextSize = 13
+upgradeStatus.TextXAlignment = Enum.TextXAlignment.Left
+upgradeStatus.Parent = frame
+
+local moneyLabel = Instance.new("TextLabel")
+moneyLabel.Size = UDim2.new(1, -20, 0, 18)
+moneyLabel.Position = UDim2.new(0, 10, 0, 58)
+moneyLabel.BackgroundTransparency = 1
+moneyLabel.Text = "Money: 0"
+moneyLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+moneyLabel.Font = Enum.Font.Gotham
+moneyLabel.TextSize = 13
+moneyLabel.TextXAlignment = Enum.TextXAlignment.Left
+moneyLabel.Parent = frame
+
+local nextLabel = Instance.new("TextLabel")
+nextLabel.Size = UDim2.new(1, -20, 0, 18)
+nextLabel.Position = UDim2.new(0, 10, 0, 78)
+nextLabel.BackgroundTransparency = 1
+nextLabel.Text = "Next: 975"
+nextLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+nextLabel.Font = Enum.Font.Gotham
+nextLabel.TextSize = 13
+nextLabel.TextXAlignment = Enum.TextXAlignment.Left
+nextLabel.Parent = frame
+
+local presetLabel = Instance.new("TextLabel")
+presetLabel.Size = UDim2.new(1, -20, 0, 18)
+presetLabel.Position = UDim2.new(0, 10, 0, 98)
+presetLabel.BackgroundTransparency = 1
+presetLabel.Text = "Preset: (searching...)"
+presetLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+presetLabel.Font = Enum.Font.Gotham
+presetLabel.TextSize = 12
+presetLabel.TextXAlignment = Enum.TextXAlignment.Left
+presetLabel.Parent = frame
+
+local upboardStatus = Instance.new("TextLabel")
+upboardStatus.Size = UDim2.new(1, -20, 0, 18)
+upboardStatus.Position = UDim2.new(0, 10, 0, 128)
+upboardStatus.BackgroundTransparency = 1
+upboardStatus.Text = "Upboard: OFF"
+upboardStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+upboardStatus.Font = Enum.Font.Gotham
+upboardStatus.TextSize = 13
+upboardStatus.TextXAlignment = Enum.TextXAlignment.Left
+upboardStatus.Parent = frame
+
+local playAgainVisibleLabel = Instance.new("TextLabel")
+playAgainVisibleLabel.Size = UDim2.new(1, -20, 0, 18)
+playAgainVisibleLabel.Position = UDim2.new(0, 10, 0, 148)
+playAgainVisibleLabel.BackgroundTransparency = 1
+playAgainVisibleLabel.Text = "PlayAgainHolder.Visible: (waiting...)"
+playAgainVisibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+playAgainVisibleLabel.Font = Enum.Font.Gotham
+playAgainVisibleLabel.TextSize = 12
+playAgainVisibleLabel.TextXAlignment = Enum.TextXAlignment.Left
+playAgainVisibleLabel.Parent = frame
+
+local waveSkipStatus = Instance.new("TextLabel")
+waveSkipStatus.Size = UDim2.new(1, -20, 0, 18)
+waveSkipStatus.Position = UDim2.new(0, 10, 0, 178)
+waveSkipStatus.BackgroundTransparency = 1
+waveSkipStatus.Text = "WaveSkip: OFF"
+waveSkipStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+waveSkipStatus.Font = Enum.Font.Gotham
+waveSkipStatus.TextSize = 13
+waveSkipStatus.TextXAlignment = Enum.TextXAlignment.Left
+waveSkipStatus.Parent = frame
+
+local waveSkipVisibleLabel = Instance.new("TextLabel")
+waveSkipVisibleLabel.Size = UDim2.new(1, -20, 0, 18)
+waveSkipVisibleLabel.Position = UDim2.new(0, 10, 0, 198)
+waveSkipVisibleLabel.BackgroundTransparency = 1
+waveSkipVisibleLabel.Text = "WaveSkip.Visible: (waiting...)"
+waveSkipVisibleLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+waveSkipVisibleLabel.Font = Enum.Font.Gotham
+waveSkipVisibleLabel.TextSize = 12
+waveSkipVisibleLabel.TextXAlignment = Enum.TextXAlignment.Left
+waveSkipVisibleLabel.Parent = frame
+
+-- memory label
+local memoryLabel = Instance.new("TextLabel")
+memoryLabel.Size = UDim2.new(1, -20, 0, 18)
+memoryLabel.Position = UDim2.new(0, 10, 0, 228)
+memoryLabel.BackgroundTransparency = 1
+memoryLabel.Text = "Memory: ..."
+memoryLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+memoryLabel.Font = Enum.Font.Gotham
+memoryLabel.TextSize = 12
+memoryLabel.TextXAlignment = Enum.TextXAlignment.Left
+memoryLabel.Parent = frame
+
+-- buttons
+local upgradeToggle = Instance.new("TextButton")
+upgradeToggle.Size = UDim2.new(0.33, -14, 0, 34)
+upgradeToggle.Position = UDim2.new(0, 10, 1, -44)
+upgradeToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
+upgradeToggle.BorderSizePixel = 0
+upgradeToggle.Text = "Upgrade: OFF"
+upgradeToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+upgradeToggle.Font = Enum.Font.GothamBold
+upgradeToggle.TextSize = 14
+upgradeToggle.Parent = frame
+
+local upboardToggle = Instance.new("TextButton")
+upboardToggle.Size = UDim2.new(0.33, -14, 0, 34)
+upboardToggle.Position = UDim2.new(0.33, 7, 1, -44)
+upboardToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
+upboardToggle.BorderSizePixel = 0
+upboardToggle.Text = "Upboard: OFF"
+upboardToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+upboardToggle.Font = Enum.Font.GothamBold
+upboardToggle.TextSize = 14
+upboardToggle.Parent = frame
+
+local waveSkipToggle = Instance.new("TextButton")
+waveSkipToggle.Size = UDim2.new(0.34, -14, 0, 34)
+waveSkipToggle.Position = UDim2.new(0.66, 7, 1, -44)
+waveSkipToggle.BackgroundColor3 = Color3.fromRGB(70, 70, 75)
+waveSkipToggle.BorderSizePixel = 0
+waveSkipToggle.Text = "WaveSkip: OFF"
+waveSkipToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+waveSkipToggle.Font = Enum.Font.GothamBold
+waveSkipToggle.TextSize = 14
+waveSkipToggle.Parent = frame
+
+local c1 = Instance.new("UICorner"); c1.CornerRadius = UDim.new(0, 10); c1.Parent = upgradeToggle
+local c2 = Instance.new("UICorner"); c2.CornerRadius = UDim.new(0, 10); c2.Parent = upboardToggle
+local c3 = Instance.new("UICorner"); c3.CornerRadius = UDim.new(0, 10); c3.Parent = waveSkipToggle
+
+-- auto-rejoin toggle
+local rejoinToggle = Instance.new("TextButton")
+rejoinToggle.Size = UDim2.new(1, -20, 0, 30)
+rejoinToggle.Position = UDim2.new(0, 10, 0, 252)
+rejoinToggle.BackgroundColor3 = Color3.fromRGB(0, 170, 85)
+rejoinToggle.BorderSizePixel = 0
+rejoinToggle.Text = "Auto-Rejoin: ON"
+rejoinToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+rejoinToggle.Font = Enum.Font.GothamBold
+rejoinToggle.TextSize = 13
+rejoinToggle.Parent = frame
+local rC = Instance.new("UICorner"); rC.CornerRadius = UDim.new(0, 10); rC.Parent = rejoinToggle
+
+local function setPlayAgainVisibleLabel(v)
+	if v == nil then
+		setTextIfChanged(playAgainVisibleLabel, "PlayAgainHolder.Visible: (waiting...)")
+	else
+		setTextIfChanged(playAgainVisibleLabel, "PlayAgainHolder.Visible: " .. tostring(v))
+	end
+end
+
+local function setWaveSkipVisibleLabel(v)
+	if v == nil then
+		setTextIfChanged(waveSkipVisibleLabel, "WaveSkip.Visible: (waiting...)")
+	else
+		setTextIfChanged(waveSkipVisibleLabel, "WaveSkip.Visible: " .. tostring(v))
+	end
+end
+
+local function updateUI(statusText)
+	setTextIfChanged(moneyLabel, ("Money: %d"):format(math.floor(currentMoney + 0.5)))
+	local nextTarget = thresholds[nextIndex]
+	setTextIfChanged(nextLabel, nextTarget and ("Next: %d"):format(nextTarget) or "Next: DONE")
+
+	local preset = getBladePreset()
+	setTextIfChanged(presetLabel, ("Preset: %s"):format(preset and preset.Name or "(not found)"))
+
+	upgradeToggle.Text = autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF"
+	upgradeToggle.BackgroundColor3 = autoUpgradeEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	upboardToggle.Text = autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF"
+	upboardToggle.BackgroundColor3 = autoUpboardEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	waveSkipToggle.Text = autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF"
+	waveSkipToggle.BackgroundColor3 = autoWaveSkipEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	rejoinToggle.Text = autoRejoinEnabled and "Auto-Rejoin: ON" or "Auto-Rejoin: OFF"
+	rejoinToggle.BackgroundColor3 = autoRejoinEnabled and Color3.fromRGB(0, 170, 85) or Color3.fromRGB(70, 70, 75)
+
+	if statusText then
+		if statusText:sub(1, 7) == "Upgrade" then
+			setTextIfChanged(upgradeStatus, statusText)
+		elseif statusText:sub(1, 6) == "Upboard" then
+			setTextIfChanged(upboardStatus, statusText)
+		elseif statusText:sub(1, 7) == "WaveSkip" then
+			setTextIfChanged(waveSkipStatus, statusText)
+		end
+	else
+		setTextIfChanged(upgradeStatus, autoUpgradeEnabled and "Upgrade: ON" or "Upgrade: OFF")
+		setTextIfChanged(upboardStatus, autoUpboardEnabled and "Upboard: ON" or "Upboard: OFF")
+		setTextIfChanged(waveSkipStatus, autoWaveSkipEnabled and "WaveSkip: ON" or "WaveSkip: OFF")
+	end
+end
+
+-- ===== AUTO-REJOIN LOOP =====
+local lastOverAt = 0
+local lastRejoinAt = 0
+
+task.spawn(function()
+	while stillCurrent() do
+		local mem = getClientMemoryMB()
+		setTextIfChanged(memoryLabel, ("Memory: %d MB"):format(math.floor(mem + 0.5)))
+
+		local now = os.clock()
+
+		if autoRejoinEnabled then
+			if mem >= REJOIN_AT_MB then
+				if lastOverAt == 0 then lastOverAt = now end
+
+				local overFor = now - lastOverAt
+				local sinceLast = now - lastRejoinAt
+
+				if overFor >= REJOIN_CONFIRM_SECONDS and sinceLast >= REJOIN_COOLDOWN_SECONDS then
+					lastRejoinAt = now
+					lastOverAt = 0
+
+					pcall(function() stopAll() end)
+					pcall(function()
+						TeleportService:Teleport(game.PlaceId, player)
+					end)
+					return
+				end
+			else
+				lastOverAt = 0
+			end
+		else
+			lastOverAt = 0
+		end
+
+		task.wait(1)
+	end
+end)
+
+-- ===== BUTTON EVENTS =====
+maid:Give(closeBtn.MouseButton1Click:Connect(function()
+	stopAll()
+end))
+
+maid:Give(rejoinToggle.MouseButton1Click:Connect(function()
+	if not stillCurrent() then return end
+	autoRejoinEnabled = not autoRejoinEnabled
+	updateUI()
+end))
+
+maid:Give(MoneyRemote.OnClientEvent:Connect(function(action, amount)
+	if not stillCurrent() then return end
+	if action ~= "Update" then return end
+	currentMoney = tonumber(amount) or 0
+	updateUI()
+	processUpgrades(updateUI)
+end))
+
+maid:Give(upgradeToggle.MouseButton1Click:Connect(function()
+	if not stillCurrent() then return end
+	autoUpgradeEnabled = not autoUpgradeEnabled
+	updateUI()
+	processUpgrades(updateUI)
+end))
+
+maid:Give(upboardToggle.MouseButton1Click:Connect(function()
+	if not stillCurrent() then return end
+	autoUpboardEnabled = not autoUpboardEnabled
+	if autoUpboardEnabled then
+		upboardLastAction = nil
+		upboardLastFireAt = 0
+	end
+	updateUI()
+end))
+
+maid:Give(waveSkipToggle.MouseButton1Click:Connect(function()
+	if not stillCurrent() then return end
+	autoWaveSkipEnabled = not autoWaveSkipEnabled
+	handlingWaveSkip = false
+	updateUI()
+
+	if autoWaveSkipEnabled then
+		local ws = tryGetWaveSkipGui()
+		if ws and ws.Visible then
+			handleWaveSkipVisible(updateUI)
+		end
+	end
+end))
+
+maid:Give(UpboardRemote.OnClientEvent:Connect(function(action, ...)
+	if not stillCurrent() then return end
+	if action == "EndGame" then
+		handleEndGame(updateUI, setPlayAgainVisibleLabel)
+	elseif action == "TurnOffBoard" then
+		handleTurnOffBoard(updateUI)
+	end
+end))
+
+-- ===== START LOOPS =====
+startUpboardLoop(updateUI, setPlayAgainVisibleLabel)
+hookWaveSkip(updateUI, setWaveSkipVisibleLabel)
+updateUI()
