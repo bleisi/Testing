@@ -3,64 +3,79 @@
 local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 
--- Try both Arena / arena
-local function getArena()
-	return workspace:FindFirstChild("Arena") or workspace:FindFirstChild("arena")
-end
-
 local enabled = false
 local lastTp = 0
 local COOLDOWN = 0.5
+
+local TARGET_NAMES = {
+	Candy = true,
+	Gift = true,
+}
 
 local function getChar()
 	return player.Character or player.CharacterAdded:Wait()
 end
 
-local function tpTo(part: Instance)
+local function getTeleportCFrameFromInstance(inst: Instance): CFrame?
+	-- Supports Part or Model
+	if inst:IsA("BasePart") then
+		return inst.CFrame
+	end
+
+	if inst:IsA("Model") then
+		-- Prefer PrimaryPart if set
+		if inst.PrimaryPart then
+			return inst.PrimaryPart.CFrame
+		end
+		-- Otherwise find any BasePart inside
+		local part = inst:FindFirstChildWhichIsA("BasePart", true)
+		if part then
+			return part.CFrame
+		end
+	end
+
+	return nil
+end
+
+local function tpTo(inst: Instance)
 	if not enabled then return end
-	if not part or not part:IsA("BasePart") then return end
 
 	local now = os.clock()
 	if now - lastTp < COOLDOWN then return end
 	lastTp = now
 
+	local cf = getTeleportCFrameFromInstance(inst)
+	if not cf then return end
+
 	local char = getChar()
 	local hrp = char:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
 
-	-- Teleport 5 studs above the target
-	char:PivotTo(part.CFrame + Vector3.new(0, 5, 0))
+	-- Teleport 5 studs above target
+	char:PivotTo(cf + Vector3.new(0, 5, 0))
 end
 
-local function handleChild(child: Instance)
+local function handleInstance(inst: Instance)
 	if not enabled then return end
-	if child.Name == "Candy" or child.Name == "Gift" then
-		-- tiny delay helps if it spawns then gets positioned
-		task.wait(0.05)
-		tpTo(child)
+	if TARGET_NAMES[inst.Name] then
+		task.wait(0.05) -- helps if it spawns then positions
+		tpTo(inst)
 	end
 end
 
--- Wait for arena folder
-local arena = getArena()
-while not arena do
-	task.wait(0.5)
-	arena = getArena()
-end
+-- Listen for new spawns directly under workspace
+workspace.ChildAdded:Connect(handleInstance)
 
--- Connect spawn listener
-arena.ChildAdded:Connect(handleChild)
-
--- Also handle ones already there *when you turn it on* via the GUI
+-- Also check existing targets when toggling ON
 local function teleportToExistingTargets()
-	for _, child in ipairs(arena:GetChildren()) do
-		if child.Name == "Candy" or child.Name == "Gift" then
+	for _, child in ipairs(workspace:GetChildren()) do
+		if TARGET_NAMES[child.Name] then
 			tpTo(child)
 		end
 	end
 end
 
--- Build GUI
+-- ===== GUI =====
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoTpGUI"
 gui.ResetOnSpawn = false
@@ -75,7 +90,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 24)
 title.Position = UDim2.new(0, 10, 0, 8)
 title.BackgroundTransparency = 1
-title.Text = "Auto TP (Candy/Gift)"
+title.Text = "Auto TP (Workspace Candy/Gift)"
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = frame
 
@@ -95,14 +110,12 @@ status.Parent = frame
 
 local function refreshUi()
 	toggle.Text = enabled and "ON" or "OFF"
-	status.Text = enabled and "Enabled (waiting for spawns...)" or "Disabled"
+	status.Text = enabled and "Enabled (watching Workspace...)" or "Disabled"
 end
 
 toggle.MouseButton1Click:Connect(function()
 	enabled = not enabled
 	refreshUi()
-
-	-- If turning ON, immediately TP to any existing Candy/Gift
 	if enabled then
 		teleportToExistingTargets()
 	end
