@@ -6,11 +6,15 @@ local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 local enabled = false
-local SCAN_INTERVAL = 0.25      -- how often to rescan
+
+local SCAN_INTERVAL = 0.25      -- seconds between scans
 local TELEPORT_HEIGHT = 6       -- studs above target
-local STUCK_RETRY_TIME = 2.0    -- if target doesn't disappear, switch target after this
+local SWITCH_AFTER = 2.0        -- if target doesn't disappear, switch
+local MIN_TP_INTERVAL = 0.12    -- avoid spamming teleport
 
 local TARGET_NAMES = { Candy = true, Gift = true }
+
+local lastTpTime = 0
 
 local function getChar()
 	return player.Character or player.CharacterAdded:Wait()
@@ -22,6 +26,7 @@ local function getHRP()
 end
 
 local function getPivotCF(inst: Instance): CFrame?
+	-- Works for Model/BasePart (PVInstances)
 	local ok, cf = pcall(function()
 		if inst and inst.GetPivot then
 			return inst:GetPivot()
@@ -31,78 +36,70 @@ local function getPivotCF(inst: Instance): CFrame?
 	return (ok and cf) or nil
 end
 
-local function isValidTarget(inst: Instance): boolean
+local function isTarget(inst: Instance): boolean
 	if not inst or not inst.Parent then return false end
 	if not TARGET_NAMES[inst.Name] then return false end
 	return inst:IsA("Model") or inst:IsA("BasePart")
 end
 
-local function distanceTo(inst: Instance, fromPos: Vector3): number
-	local cf = getPivotCF(inst)
-	if not cf then return math.huge end
-	return (cf.Position - fromPos).Magnitude
-end
-
-local function getAllTargets()
-	local targets = {}
-	for _, inst in ipairs(workspace:GetChildren()) do
-		if isValidTarget(inst) then
-			table.insert(targets, inst)
-		end
-	end
-	return targets
-end
-
-local function getClosestTarget()
-	local hrp = getHRP()
-	if not hrp then return nil end
-
-	local best, bestDist = nil, math.huge
-	for _, inst in ipairs(getAllTargets()) do
-		local d = distanceTo(inst, hrp.Position)
-		if d < bestDist then
-			bestDist = d
-			best = inst
-		end
-	end
-	return best
-end
-
 local function teleportTo(inst: Instance)
+	local now = os.clock()
+	if now - lastTpTime < MIN_TP_INTERVAL then return end
+	lastTpTime = now
+
 	local cf = getPivotCF(inst)
 	if not cf then return end
 	getChar():PivotTo(cf + Vector3.new(0, TELEPORT_HEIGHT, 0))
 end
 
--- Main farming loop
+local function findClosestTarget(): Instance?
+	local hrp = getHRP()
+	if not hrp then return nil end
+	local origin = hrp.Position
+
+	local best, bestDist = nil, math.huge
+
+	-- IMPORTANT: only direct children (fast + low allocations)
+	for _, inst in ipairs(workspace:GetChildren()) do
+		if isTarget(inst) then
+			local cf = getPivotCF(inst)
+			if cf then
+				local d = (cf.Position - origin).Magnitude
+				if d < bestDist then
+					bestDist = d
+					best = inst
+				end
+			end
+		end
+	end
+
+	return best
+end
+
+-- Main loop (single thread, no accumulating connections)
 task.spawn(function()
 	while true do
-		-- Idle when disabled
-		while not enabled do
+		if not enabled then
 			task.wait(0.2)
-		end
+		else
+			local target = findClosestTarget()
+			if not target then
+				task.wait(SCAN_INTERVAL)
+			else
+				teleportTo(target)
 
-		local target = getClosestTarget()
-		if not target then
-			-- nothing to farm
-			task.wait(SCAN_INTERVAL)
-			continue
-		end
+				-- Wait until it disappears, or switch if it doesn't
+				local start = os.clock()
+				while enabled and target.Parent do
+					if os.clock() - start > SWITCH_AFTER then
+						break
+					end
+					RunService.Heartbeat:Wait()
+				end
 
-		-- Teleport to chosen target
-		teleportTo(target)
-
-		-- Wait until target is gone (collected) OR we give up and pick another
-		local start = os.clock()
-		while enabled and target and target.Parent do
-			-- if it takes too long, break and pick another (prevents getting stuck)
-			if os.clock() - start > STUCK_RETRY_TIME then
-				break
+				task.wait(0.05)
 			end
-			RunService.Heartbeat:Wait()
 		end
-
-		task.wait(0.05)
 	end
 end)
 
@@ -136,13 +133,13 @@ status.Size = UDim2.new(1, -20, 0, 40)
 status.Position = UDim2.new(0, 10, 0, 88)
 status.BackgroundTransparency = 1
 status.TextXAlignment = Enum.TextXAlignment.Left
-status.Text = "Disabled"
 status.TextWrapped = true
+status.Text = "Disabled"
 status.Parent = frame
 
 local function refresh()
 	toggle.Text = enabled and "ON" or "OFF"
-	status.Text = enabled and "Enabled: scanning workspace and teleporting until none left." or "Disabled"
+	status.Text = enabled and "Enabled: teleports until none left." or "Disabled"
 end
 
 toggle.MouseButton1Click:Connect(function()
