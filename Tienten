@@ -1,0 +1,111 @@
+-- StarterPlayerScripts/AutoTpCandyGift.client.lua
+
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+
+-- Try both Arena / arena
+local function getArena()
+	return workspace:FindFirstChild("Arena") or workspace:FindFirstChild("arena")
+end
+
+local enabled = false
+local lastTp = 0
+local COOLDOWN = 0.5
+
+local function getChar()
+	return player.Character or player.CharacterAdded:Wait()
+end
+
+local function tpTo(part: Instance)
+	if not enabled then return end
+	if not part or not part:IsA("BasePart") then return end
+
+	local now = os.clock()
+	if now - lastTp < COOLDOWN then return end
+	lastTp = now
+
+	local char = getChar()
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	-- Teleport 5 studs above the target
+	char:PivotTo(part.CFrame + Vector3.new(0, 5, 0))
+end
+
+local function handleChild(child: Instance)
+	if not enabled then return end
+	if child.Name == "Candy" or child.Name == "Gift" then
+		-- tiny delay helps if it spawns then gets positioned
+		task.wait(0.05)
+		tpTo(child)
+	end
+end
+
+-- Wait for arena folder
+local arena = getArena()
+while not arena do
+	task.wait(0.5)
+	arena = getArena()
+end
+
+-- Connect spawn listener
+arena.ChildAdded:Connect(handleChild)
+
+-- Also handle ones already there *when you turn it on* via the GUI
+local function teleportToExistingTargets()
+	for _, child in ipairs(arena:GetChildren()) do
+		if child.Name == "Candy" or child.Name == "Gift" then
+			tpTo(child)
+		end
+	end
+end
+
+-- Build GUI
+local gui = Instance.new("ScreenGui")
+gui.Name = "AutoTpGUI"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 240, 0, 110)
+frame.Position = UDim2.new(0, 20, 0, 120)
+frame.Parent = gui
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -20, 0, 24)
+title.Position = UDim2.new(0, 10, 0, 8)
+title.BackgroundTransparency = 1
+title.Text = "Auto TP (Candy/Gift)"
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local toggle = Instance.new("TextButton")
+toggle.Size = UDim2.new(1, -20, 0, 40)
+toggle.Position = UDim2.new(0, 10, 0, 38)
+toggle.Text = "OFF"
+toggle.Parent = frame
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 20)
+status.Position = UDim2.new(0, 10, 0, 82)
+status.BackgroundTransparency = 1
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Text = "Disabled"
+status.Parent = frame
+
+local function refreshUi()
+	toggle.Text = enabled and "ON" or "OFF"
+	status.Text = enabled and "Enabled (waiting for spawns...)" or "Disabled"
+end
+
+toggle.MouseButton1Click:Connect(function()
+	enabled = not enabled
+	refreshUi()
+
+	-- If turning ON, immediately TP to any existing Candy/Gift
+	if enabled then
+		teleportToExistingTargets()
+	end
+end)
+
+refreshUi()
