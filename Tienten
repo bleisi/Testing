@@ -1,76 +1,107 @@
 -- StarterPlayerScripts/AutoTpCandyGift.client.lua
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 local enabled = false
 local lastTp = 0
 local COOLDOWN = 0.5
 
-local TARGET_NAMES = {
-	Candy = true,
-	Gift = true,
-}
+local TARGET_NAMES = { Candy = true, Gift = true }
 
 local function getChar()
 	return player.Character or player.CharacterAdded:Wait()
 end
 
-local function getTeleportCFrameFromInstance(inst: Instance): CFrame?
-	-- Supports Part or Model
-	if inst:IsA("BasePart") then
-		return inst.CFrame
-	end
-
-	if inst:IsA("Model") then
-		-- Prefer PrimaryPart if set
-		if inst.PrimaryPart then
-			return inst.PrimaryPart.CFrame
-		end
-		-- Otherwise find any BasePart inside
-		local part = inst:FindFirstChildWhichIsA("BasePart", true)
-		if part then
-			return part.CFrame
-		end
-	end
-
-	return nil
+local function getHRP()
+	local char = getChar()
+	return char:WaitForChild("HumanoidRootPart", 5)
 end
 
-local function tpTo(inst: Instance)
+local function getBestPivotCF(inst: Instance): CFrame?
+	-- Works for Model, BasePart, etc.
+	-- GetPivot exists on PVInstance (Model, BasePart). Most things you care about are PVInstances.
+	local ok, cf = pcall(function()
+		if inst and inst.GetPivot then
+			return inst:GetPivot()
+		end
+		return nil
+	end)
+	return (ok and cf) or nil
+end
+
+local function waitForStablePivot(inst: Instance, maxSeconds: number): CFrame?
+	local start = os.clock()
+	local last: CFrame? = nil
+	local stableFrames = 0
+
+	while os.clock() - start < maxSeconds do
+		if not inst or not inst.Parent then return nil end
+
+		local cf = getBestPivotCF(inst)
+		if cf then
+			-- consider it "stable" if it doesn't change much for a few frames
+			if last and (cf.Position - last.Position).Magnitude < 0.01 then
+				stableFrames += 1
+			else
+				stableFrames = 0
+			end
+			last = cf
+
+			if stableFrames >= 2 then
+				return cf
+			end
+		end
+
+		RunService.Heartbeat:Wait()
+	end
+
+	-- fallback to whatever we got last
+	return last
+end
+
+local function teleportTo(inst: Instance)
 	if not enabled then return end
+	if not TARGET_NAMES[inst.Name] then return end
 
 	local now = os.clock()
 	if now - lastTp < COOLDOWN then return end
 	lastTp = now
 
-	local cf = getTeleportCFrameFromInstance(inst)
-	if not cf then return end
-
-	local char = getChar()
-	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hrp = getHRP()
 	if not hrp then return end
 
-	-- Teleport 5 studs above target
-	char:PivotTo(cf + Vector3.new(0, 5, 0))
+	-- Wait a bit for the object to be positioned/pivoted
+	local cf = waitForStablePivot(inst, 1.5)
+	if not cf then return end
+
+	-- Teleport 6 studs above pivot position
+	getChar():PivotTo(cf + Vector3.new(0, 6, 0))
 end
 
-local function handleInstance(inst: Instance)
+local function consider(inst: Instance)
 	if not enabled then return end
 	if TARGET_NAMES[inst.Name] then
-		task.wait(0.05) -- helps if it spawns then positions
-		tpTo(inst)
+		teleportTo(inst)
 	end
 end
 
--- Listen for new spawns directly under workspace
-workspace.ChildAdded:Connect(handleInstance)
+-- Watch for new workspace children
+workspace.ChildAdded:Connect(function(child)
+	consider(child)
 
--- Also check existing targets when toggling ON
-local function teleportToExistingTargets()
+	-- If it gets renamed to Candy/Gift shortly after spawning
+	child:GetPropertyChangedSignal("Name"):Connect(function()
+		consider(child)
+	end)
+end)
+
+-- When toggling ON, scan existing workspace children
+local function teleportToExisting()
 	for _, child in ipairs(workspace:GetChildren()) do
 		if TARGET_NAMES[child.Name] then
-			tpTo(child)
+			teleportTo(child)
 		end
 	end
 end
@@ -82,7 +113,7 @@ gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 240, 0, 110)
+frame.Size = UDim2.new(0, 260, 0, 120)
 frame.Position = UDim2.new(0, 20, 0, 120)
 frame.Parent = gui
 
@@ -90,35 +121,35 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 24)
 title.Position = UDim2.new(0, 10, 0, 8)
 title.BackgroundTransparency = 1
-title.Text = "Auto TP (Workspace Candy/Gift)"
+title.Text = "Auto TP (Candy/Gift in Workspace)"
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = frame
 
 local toggle = Instance.new("TextButton")
-toggle.Size = UDim2.new(1, -20, 0, 40)
+toggle.Size = UDim2.new(1, -20, 0, 44)
 toggle.Position = UDim2.new(0, 10, 0, 38)
 toggle.Text = "OFF"
 toggle.Parent = frame
 
 local status = Instance.new("TextLabel")
 status.Size = UDim2.new(1, -20, 0, 20)
-status.Position = UDim2.new(0, 10, 0, 82)
+status.Position = UDim2.new(0, 10, 0, 88)
 status.BackgroundTransparency = 1
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.Text = "Disabled"
 status.Parent = frame
 
-local function refreshUi()
+local function refresh()
 	toggle.Text = enabled and "ON" or "OFF"
-	status.Text = enabled and "Enabled (watching Workspace...)" or "Disabled"
+	status.Text = enabled and "Enabled (watching workspace...)" or "Disabled"
 end
 
 toggle.MouseButton1Click:Connect(function()
 	enabled = not enabled
-	refreshUi()
+	refresh()
 	if enabled then
-		teleportToExistingTargets()
+		teleportToExisting()
 	end
 end)
 
-refreshUi()
+refresh()
