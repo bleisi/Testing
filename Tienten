@@ -1,12 +1,14 @@
--- StarterPlayerScripts/AutoTpCandyGift.client.lua
+-- StarterPlayerScripts/AutoFarmCandyGift.client.lua
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+
 local player = Players.LocalPlayer
 
 local enabled = false
-local lastTp = 0
-local COOLDOWN = 0.5
+local SCAN_INTERVAL = 0.25      -- how often to rescan
+local TELEPORT_HEIGHT = 6       -- studs above target
+local STUCK_RETRY_TIME = 2.0    -- if target doesn't disappear, switch target after this
 
 local TARGET_NAMES = { Candy = true, Gift = true }
 
@@ -19,9 +21,7 @@ local function getHRP()
 	return char:WaitForChild("HumanoidRootPart", 5)
 end
 
-local function getBestPivotCF(inst: Instance): CFrame?
-	-- Works for Model, BasePart, etc.
-	-- GetPivot exists on PVInstance (Model, BasePart). Most things you care about are PVInstances.
+local function getPivotCF(inst: Instance): CFrame?
 	local ok, cf = pcall(function()
 		if inst and inst.GetPivot then
 			return inst:GetPivot()
@@ -31,89 +31,89 @@ local function getBestPivotCF(inst: Instance): CFrame?
 	return (ok and cf) or nil
 end
 
-local function waitForStablePivot(inst: Instance, maxSeconds: number): CFrame?
-	local start = os.clock()
-	local last: CFrame? = nil
-	local stableFrames = 0
+local function isValidTarget(inst: Instance): boolean
+	if not inst or not inst.Parent then return false end
+	if not TARGET_NAMES[inst.Name] then return false end
+	return inst:IsA("Model") or inst:IsA("BasePart")
+end
 
-	while os.clock() - start < maxSeconds do
-		if not inst or not inst.Parent then return nil end
+local function distanceTo(inst: Instance, fromPos: Vector3): number
+	local cf = getPivotCF(inst)
+	if not cf then return math.huge end
+	return (cf.Position - fromPos).Magnitude
+end
 
-		local cf = getBestPivotCF(inst)
-		if cf then
-			-- consider it "stable" if it doesn't change much for a few frames
-			if last and (cf.Position - last.Position).Magnitude < 0.01 then
-				stableFrames += 1
-			else
-				stableFrames = 0
-			end
-			last = cf
-
-			if stableFrames >= 2 then
-				return cf
-			end
+local function getAllTargets()
+	local targets = {}
+	for _, inst in ipairs(workspace:GetChildren()) do
+		if isValidTarget(inst) then
+			table.insert(targets, inst)
 		end
-
-		RunService.Heartbeat:Wait()
 	end
+	return targets
+end
 
-	-- fallback to whatever we got last
-	return last
+local function getClosestTarget()
+	local hrp = getHRP()
+	if not hrp then return nil end
+
+	local best, bestDist = nil, math.huge
+	for _, inst in ipairs(getAllTargets()) do
+		local d = distanceTo(inst, hrp.Position)
+		if d < bestDist then
+			bestDist = d
+			best = inst
+		end
+	end
+	return best
 end
 
 local function teleportTo(inst: Instance)
-	if not enabled then return end
-	if not TARGET_NAMES[inst.Name] then return end
-
-	local now = os.clock()
-	if now - lastTp < COOLDOWN then return end
-	lastTp = now
-
-	local hrp = getHRP()
-	if not hrp then return end
-
-	-- Wait a bit for the object to be positioned/pivoted
-	local cf = waitForStablePivot(inst, 1.5)
+	local cf = getPivotCF(inst)
 	if not cf then return end
-
-	-- Teleport 6 studs above pivot position
-	getChar():PivotTo(cf + Vector3.new(0, 6, 0))
+	getChar():PivotTo(cf + Vector3.new(0, TELEPORT_HEIGHT, 0))
 end
 
-local function consider(inst: Instance)
-	if not enabled then return end
-	if TARGET_NAMES[inst.Name] then
-		teleportTo(inst)
-	end
-end
-
--- Watch for new workspace children
-workspace.ChildAdded:Connect(function(child)
-	consider(child)
-
-	-- If it gets renamed to Candy/Gift shortly after spawning
-	child:GetPropertyChangedSignal("Name"):Connect(function()
-		consider(child)
-	end)
-end)
-
--- When toggling ON, scan existing workspace children
-local function teleportToExisting()
-	for _, child in ipairs(workspace:GetChildren()) do
-		if TARGET_NAMES[child.Name] then
-			teleportTo(child)
+-- Main farming loop
+task.spawn(function()
+	while true do
+		-- Idle when disabled
+		while not enabled do
+			task.wait(0.2)
 		end
+
+		local target = getClosestTarget()
+		if not target then
+			-- nothing to farm
+			task.wait(SCAN_INTERVAL)
+			continue
+		end
+
+		-- Teleport to chosen target
+		teleportTo(target)
+
+		-- Wait until target is gone (collected) OR we give up and pick another
+		local start = os.clock()
+		while enabled and target and target.Parent do
+			-- if it takes too long, break and pick another (prevents getting stuck)
+			if os.clock() - start > STUCK_RETRY_TIME then
+				break
+			end
+			RunService.Heartbeat:Wait()
+		end
+
+		task.wait(0.05)
 	end
-end
+end)
 
 -- ===== GUI =====
 local gui = Instance.new("ScreenGui")
-gui.Name = "AutoTpGUI"
+gui.Name = "AutoFarmGUI"
 gui.ResetOnSpawn = false
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 260, 0, 120)
+frame.Size = UDim2.new(0, 270, 0, 130)
 frame.Position = UDim2.new(0, 20, 0, 120)
 frame.Parent = gui
 
@@ -121,8 +121,8 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 24)
 title.Position = UDim2.new(0, 10, 0, 8)
 title.BackgroundTransparency = 1
-title.Text = "Auto TP (Candy/Gift in Workspace)"
 title.TextXAlignment = Enum.TextXAlignment.Left
+title.Text = "Auto Farm (Candy/Gift)"
 title.Parent = frame
 
 local toggle = Instance.new("TextButton")
@@ -132,24 +132,22 @@ toggle.Text = "OFF"
 toggle.Parent = frame
 
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 20)
+status.Size = UDim2.new(1, -20, 0, 40)
 status.Position = UDim2.new(0, 10, 0, 88)
 status.BackgroundTransparency = 1
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.Text = "Disabled"
+status.TextWrapped = true
 status.Parent = frame
 
 local function refresh()
 	toggle.Text = enabled and "ON" or "OFF"
-	status.Text = enabled and "Enabled (watching workspace...)" or "Disabled"
+	status.Text = enabled and "Enabled: scanning workspace and teleporting until none left." or "Disabled"
 end
 
 toggle.MouseButton1Click:Connect(function()
 	enabled = not enabled
 	refresh()
-	if enabled then
-		teleportToExisting()
-	end
 end)
 
 refresh()
